@@ -11,6 +11,8 @@
   --bg-elevated: #1d1e21;
   --bg-hover: #242528;
   --bg-input: #121315;
+  --bg-timeline-header: #222326;
+  --bg-timeline-canvas: #101113;
   --border: #2b2c2f;
   --border-soft: #232427;
   --text-primary: #efefed;
@@ -60,6 +62,8 @@
   --bg-elevated: #ffffff;
   --bg-hover: #efeeeb;
   --bg-input: #ffffff;
+  --bg-timeline-header: #e2e0db;
+  --bg-timeline-canvas: #f0efec;
   --border: #dcdad5;
   --border-soft: #e7e5e0;
   --text-primary: #222321;
