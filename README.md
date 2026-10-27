@@ -2,7 +2,7 @@
 
 ClipWright Studio is the starting point for a local-first Windows video editor and AI-assisted clipping application. The supplied ClipWright icon is included as a replaceable asset; the wordmark and Graphite + Electric Orange theme are deliberately easy to change.
 
-> **Current status — foundation build (0.1.0).** This is an early React + TypeScript application shell, not yet a Windows desktop editor. It has a functional local project-list dashboard, project-entry management, theme switching, and a searchable command palette. Media ingestion, playback, timeline editing, transcription, AI clipping, and rendering are not implemented. The UI labels these limitations rather than simulating their results.
+> **Current status — foundation build (0.1.0).** This is an early React + TypeScript application shell, not yet a Windows desktop editor. It has a functional local project dashboard, versioned project-document schema, `.cwproject` JSON downloads, theme switching, and a searchable command palette. Downloaded files contain project metadata and an empty sequence scaffold; they do not contain media, and opening/importing them is not yet implemented. Media ingestion, playback, timeline editing, transcription, AI clipping, and rendering are not implemented. The UI labels these limitations rather than simulating their results.
 
 ## Run locally
 
@@ -24,20 +24,24 @@ npm run build
 
 - Home, AI Clipping, and Editor workspace navigation.
 - Create projects with aspect ratio and frame-rate preferences.
-- Persist project-list entries in browser local storage, scoped to the browser profile.
+- Persist project-list entries and version-1 project documents in browser local storage, scoped to the browser profile.
+- Create projects with a default video/audio sequence, integer frame-based video timing, sample-based audio timing, and rational frame rates.
+- Download a validated `.cwproject` JSON document from a project card; source media is not included.
+- Migrate the foundation’s earlier project-list records into empty v1 documents; preserve unreadable data until the user confirms recovery.
 - Open, rename, duplicate, favourite, archive/restore, search, and delete project entries.
-- Deletion is confirmed and removes only the entry; it never deletes media.
+- Deletion is confirmed and removes only local project entries/documents; it never deletes media.
 - Dark and light themes, keyboard shortcuts (`Ctrl/Cmd+K`, `Ctrl/Cmd+N`), a working command palette, and task-centre status.
 - Honest, explicit unavailable states for the not-yet-built editor and AI/media processing systems.
 
-Projects created in this foundation are **not portable project files** and do not contain source media or edits. Do not use browser storage as the sole copy of important work.
+The `.cwproject` download is a portable JSON document, but its current supported content is limited to project metadata and an empty sequence scaffold; media files are never bundled. The application cannot yet open a downloaded file. Browser storage is interim and may be cleared, so do not use it as the only copy of important work.
 
 ## Repository guide
 
 - `src/App.tsx` — workspace shell and first foundation UI.
 - `src/lib/projects.ts` — validated project-entry model and local persistence boundary.
+- `src/lib/projectDocument.ts` — versioned project-file contract, validation, serialization, migration, and document storage.
 - `src/styles/tokens.css` — centralized theme, typography, and spacing tokens.
-- `docs/` — audit, architecture decisions, setup notes, and current limitations.
+- `docs/` — audit, architecture decisions, project schema, setup notes, and current limitations.
 - `public/assets/clipwright-icon.png` — user-provided replaceable icon.
 
 ## Roadmap

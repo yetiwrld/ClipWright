@@ -4,7 +4,7 @@ Status: foundation only. These decisions establish seams and priorities, not a c
 
 ## Current implementation
 
-The current runnable increment is a TypeScript/React renderer built with Vite. Workspace selection is held in React state. Project-list records pass through `src/lib/projects.ts`, which validates their basic shape before reading localStorage. The localStorage adapter is intentionally isolated so it can be replaced by a desktop persistence adapter. The current browser app does **not** expose unrestricted filesystem or shell APIs.
+The current runnable increment is a TypeScript/React renderer built with Vite. Workspace selection is held in React state. Project-list records pass through `src/lib/projects.ts`, which validates their basic shape before reading localStorage. The localStorage adapter is intentionally isolated so it can be replaced by a desktop persistence adapter. The current browser app does **not** expose unrestricted filesystem or shell APIs. A version-1 `ProjectDocument` is now used by project creation and downloaded as a user-triggered `.cwproject` JSON file. Project payloads remain in a separate browser-local storage key; see [the schema and storage limitations](PROJECT_SCHEMA.md).
 
 ## Target Windows architecture
 
@@ -13,7 +13,7 @@ Adopt an Electron desktop shell around the existing renderer, retaining a web de
 - **Main process:** app lifecycle, native dialogs, secure file access, project-store orchestration, media/render child processes, OS integration, and credential storage.
 - **Preload bridge:** narrow, typed, allowlisted IPC methods; no raw `ipcRenderer`, Node, or unrestricted filesystem in the renderer.
 - **Renderer:** React + TypeScript UI, design system, project views, command palette, accessible controls. All state crossing IPC is validated.
-- **Project core:** versioned JSON project document with stable IDs, schema validation/migrations, integer video-frame positions/rational timebases, separate audio sample timing, atomic save plus rotating recovery checkpoints. The browser metadata model here is temporary and not that schema.
+- **Project core:** versioned JSON project document with stable IDs, schema validation/migration, integer video-frame positions/rational timebases, and separate audio sample timing. V1 is implemented; atomic desktop-file saves and rotating recovery checkpoints are not. Browser storage/downloads are interim, not the future managed project-file adapter.
 - **Media services:** dedicated probe/import and thumbnail/waveform workers. Probe candidate: FFmpeg/ffprobe, subject to Windows packaging, codec configuration, licensing, and fixture tests. Keep original media immutable; references and proxies are separate.
 - **Editing core:** pure timeline commands over the project model, command-based undo/redo, deterministic frame/time conversion, and unit/integration tests independent of UI.
 - **Preview/render:** preview and final render consume the same project instructions where feasible. Isolate decoder/encoder processes from the UI thread. An FFmpeg filter graph may serve a verified initial export path, but does not itself supply the editor model or full real-time compositor.

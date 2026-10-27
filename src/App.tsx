@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, ArrowLeft, ArrowRight, Check, ChevronDown,
+  Archive, ArrowLeft, ArrowRight, Check, ChevronDown, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
   Grid2X2, HardDrive, Heart, Home, Keyboard, LayoutPanelLeft, ListFilter,
   MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2,
@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import type { AspectRatio, Project } from './lib/projects';
+import { createProjectDocument, migrateLegacyProjectEntry, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
+import type { ProjectDocument } from './lib/projectDocument';
 
 type Workspace = 'home' | 'clipping' | 'editor';
 type Toast = { id: number; message: string; kind?: 'error' | 'success' };
@@ -28,6 +30,19 @@ export default function App() {
   const [initialProjectStore] = useState(() => readProjectStore(window.localStorage));
   const [projects, setProjects] = useState<Project[]>(initialProjectStore.projects);
   const [storageWarning, setStorageWarning] = useState(initialProjectStore.issue);
+  const [initialDocumentStore] = useState(() => readProjectDocuments(window.localStorage));
+  const [documents, setDocuments] = useState<ProjectDocument[]>(() => {
+    if (initialDocumentStore.issue) return [];
+    const byId = new Map(initialDocumentStore.documents.map((document) => [document.id, document]));
+    for (const project of initialProjectStore.projects) {
+      if (!byId.has(project.id)) {
+        try { byId.set(project.id, migrateLegacyProjectEntry(project)); }
+        catch { /* A malformed legacy record remains in the separate project-list store for recovery. */ }
+      }
+    }
+    return [...byId.values()];
+  });
+  const [documentStorageWarning, setDocumentStorageWarning] = useState(initialDocumentStore.issue);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -40,6 +55,7 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
+  const persistenceWarning = storageWarning ?? documentStorageWarning;
   const visibleProjects = useMemo(() => projects
     .filter((project) => project.archived === showArchived)
     .filter((project) => project.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
@@ -52,6 +68,16 @@ export default function App() {
   // Persist application-owned project metadata; media files are not copied or uploaded.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, storageWarning]);
+
+  useEffect(() => {
+    if (documentStorageWarning) return; // Keep unreadable project documents intact until recovery is confirmed.
+    try { writeProjectDocuments(window.localStorage, documents); }
+    catch {
+      setDocumentStorageWarning('storage-unavailable');
+      notify('Unable to save project documents in this browser profile.', 'error');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents, documentStorageWarning]);
 
   useEffect(() => {
     try { window.localStorage.setItem('clipwright.theme', theme); }
@@ -82,12 +108,14 @@ export default function App() {
   }
 
   function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate']) {
-    if (storageWarning) {
-      notify('Resolve the project-list storage warning before creating a project.', 'error');
+    if (storageWarning || documentStorageWarning) {
+      notify('Resolve the project storage warning before creating a project.', 'error');
       return;
     }
     try {
       const project = createProject(name, ratio, fps);
+      const document = createProjectDocument(project);
+      setDocuments((current) => [...current.filter((item) => item.id !== project.id), document]);
       setProjects((current) => [project, ...current]);
       setActiveProjectId(project.id);
       setWorkspace('editor');
@@ -117,26 +145,86 @@ export default function App() {
     }
   }
 
+  function startFreshDocumentStore() {
+    if (documentStorageWarning === 'storage-unavailable') {
+      notify('Browser storage is unavailable. Existing project documents were not changed.', 'error');
+      return;
+    }
+    const confirmed = window.confirm('Preserve a recovery copy of the unreadable project documents and rebuild empty documents from the project list? Existing source media will not be touched.');
+    if (!confirmed) return;
+    try {
+      const raw = window.localStorage.getItem(PROJECT_DOCUMENTS_KEY);
+      if (raw) window.localStorage.setItem(`${PROJECT_DOCUMENTS_KEY}.recovery`, raw);
+      const rebuilt = projects.map((project) => migrateLegacyProjectEntry(project));
+      window.localStorage.setItem(PROJECT_DOCUMENTS_KEY, JSON.stringify(rebuilt));
+      setDocuments(rebuilt);
+      setDocumentStorageWarning(null);
+      notify('Recovery copy preserved. Empty project documents rebuilt from the project list.');
+    } catch {
+      notify('Could not create a recovery copy. Existing project data was left untouched.', 'error');
+    }
+  }
+
+  function downloadProjectFile(project: Project) {
+    try {
+      if (documentStorageWarning) throw new Error('Project document storage needs attention. Recover it before downloading to avoid exporting an incomplete document.');
+      const document = documents.find((item) => item.id === project.id);
+      if (!document) throw new Error('No validated project document is available for this project.');
+      const contents = serializeProjectDocument(document);
+      const objectUrl = URL.createObjectURL(new Blob([contents], { type: 'application/json' }));
+      const link = window.document.createElement('a');
+      const safeName = project.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'ClipWright-project';
+      link.href = objectUrl;
+      link.download = `${safeName}.cwproject`;
+      window.document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      notify(`Downloaded ${safeName}.cwproject. Source media is not included.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not create the project file.', 'error');
+    }
+  }
+
   function openProject(project: Project) {
     setProjects((current) => current.map((item) => item.id === project.id ? { ...item, updatedAt: new Date().toISOString() } : item));
     setActiveProjectId(project.id);
     setWorkspace('editor');
   }
 
-  function updateProject(id: string, patch: Partial<Project>) {
-    setProjects((current) => current.map((project) => project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project));
+  function updateProject(id: string, patch: Partial<Project>): boolean {
+    if (patch.name && documentStorageWarning) {
+      notify('Recover project-document storage before renaming this project.', 'error');
+      return false;
+    }
+    const updatedAt = new Date().toISOString();
+    setProjects((current) => current.map((project) => project.id === id ? { ...project, ...patch, updatedAt } : project));
+    if (patch.name) setDocuments((current) => current.map((document) => document.id === id ? { ...document, metadata: { ...document.metadata, name: patch.name!.trim(), modifiedAt: updatedAt } } : document));
+    return true;
   }
 
   function duplicateProject(project: Project) {
-    const copy = { ...project, id: crypto.randomUUID(), name: `${project.name} copy`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), favorite: false, archived: false };
+    if (documentStorageWarning) {
+      notify('Recover project-document storage before duplicating this project.', 'error');
+      return;
+    }
+    const sourceDocument = documents.find((document) => document.id === project.id);
+    if (!sourceDocument) {
+      notify('This project has no validated document to duplicate.', 'error');
+      return;
+    }
+    const now = new Date().toISOString();
+    const copy = { ...project, id: crypto.randomUUID(), name: `${project.name} copy`, createdAt: now, updatedAt: now, favorite: false, archived: false };
     setProjects((current) => [copy, ...current]);
-    notify('Project entry duplicated. Source media is not copied.');
+    setDocuments((current) => [...current, { ...sourceDocument, id: copy.id, metadata: { ...sourceDocument.metadata, name: copy.name, createdAt: now, modifiedAt: now } }]);
+    notify('Project document duplicated. Source media is referenced, not copied.');
   }
 
   function deleteProject(project: Project) {
     const confirmed = window.confirm(`Delete “${project.name}” from this project list? This removes only its local project entry; it does not delete source media.`);
     if (!confirmed) return;
     setProjects((current) => current.filter((item) => item.id !== project.id));
+    setDocuments((current) => current.filter((document) => document.id !== project.id));
     if (activeProjectId === project.id) { setActiveProjectId(null); setWorkspace('home'); }
     notify('Project entry deleted. Source media was left untouched.');
   }
@@ -185,7 +273,7 @@ export default function App() {
             {workspace !== 'home' && <button className="back-button" onClick={() => navigate('home')} aria-label="Back to projects"><ArrowLeft size={16} /></button>}
             <span className="crumb-muted">Workspace</span><span className="crumb-slash">/</span><strong>{pageTitle}</strong>
           </div>
-          <div className="head-status"><span className={`status-dot ${storageWarning ? 'status-warning' : ''}`} />{storageWarning ? 'Storage needs attention' : 'All changes saved locally'}</div>
+          <div className="head-status"><span className={`status-dot ${persistenceWarning ? 'status-warning' : ''}`} />{persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'}</div>
         </div>
 
         <main className="content-area">
@@ -193,9 +281,9 @@ export default function App() {
             <section className="dashboard-view">
               <div className="welcome-row">
                 <div><div className="eyebrow">YOUR CREATIVE WORKSPACE</div><h1>Projects</h1><p className="page-description">Pick up where you left off, or start something new.</p></div>
-                <button className="button button-primary" onClick={() => setShowCreate(true)}><Plus size={17} />New project</button>
+                <button className="button button-primary" onClick={() => setShowCreate(true)} disabled={!!persistenceWarning} title={persistenceWarning ? 'Resolve the storage warning before creating projects' : undefined}><Plus size={17} />New project</button>
               </div>
-              {storageWarning && <div className="storage-warning" role="alert"><div><strong>{storageWarning === 'invalid-data' ? 'Project list could not be read' : 'Browser storage is unavailable'}</strong><p>{storageWarning === 'invalid-data' ? 'The existing data has not been overwritten. You can preserve a recovery copy before starting a fresh list.' : 'This browser profile cannot currently read local storage, so project entries cannot be saved.'}</p></div>{storageWarning === 'invalid-data' && <button className="button button-secondary button-small" onClick={startFreshProjectList}>Preserve & start fresh</button>}</div>}
+              {persistenceWarning && <div className="storage-warning" role="alert"><div><strong>{storageWarning === 'invalid-data' ? 'Project list could not be read' : documentStorageWarning === 'invalid-data' ? 'Project documents could not be read' : 'Browser storage is unavailable'}</strong><p>{storageWarning === 'invalid-data' ? 'The existing list has not been overwritten. Preserve a recovery copy before starting over.' : documentStorageWarning === 'invalid-data' ? 'The existing documents have not been overwritten. Recovery will rebuild empty documents from your project list.' : 'This browser profile cannot currently save all project data.'}</p></div>{storageWarning === 'invalid-data' ? <button className="button button-secondary button-small" onClick={startFreshProjectList}>Preserve & start fresh</button> : !storageWarning && documentStorageWarning === 'invalid-data' ? <button className="button button-secondary button-small" onClick={startFreshDocumentStore}>Preserve & rebuild</button> : null}</div>}
               <div className="dashboard-tools">
                 <div className="project-tabs" role="tablist" aria-label="Project filters">
                   <button role="tab" aria-selected={!showArchived} className={!showArchived ? 'selected' : ''} onClick={() => setShowArchived(false)}>Recent <span className="tab-count">{projects.filter((p) => !p.archived).length}</span></button>
@@ -207,8 +295,8 @@ export default function App() {
                 <div className="project-grid">
                   {visibleProjects.map((project, index) => <ProjectCard key={project.id} project={project} index={index} onOpen={() => openProject(project)} onRename={() => {
                     const name = window.prompt('Rename project', project.name);
-                    if (name?.trim()) { updateProject(project.id, { name: name.trim() }); notify('Project renamed.'); }
-                  }} onDuplicate={() => duplicateProject(project)} onArchive={() => { updateProject(project.id, { archived: !project.archived }); notify(project.archived ? 'Project restored.' : 'Project archived.'); }} onFavorite={() => updateProject(project.id, { favorite: !project.favorite })} onDelete={() => deleteProject(project)} />)}
+                    if (name?.trim() && updateProject(project.id, { name: name.trim() })) notify('Project renamed.');
+                  }} onDuplicate={() => duplicateProject(project)} onArchive={() => { updateProject(project.id, { archived: !project.archived }); notify(project.archived ? 'Project restored.' : 'Project archived.'); }} onFavorite={() => updateProject(project.id, { favorite: !project.favorite })} onDelete={() => deleteProject(project)} onDownload={() => downloadProjectFile(project)} />)}
                 </div>
               ) : query ? (
                 <div className="empty-state compact-empty"><div className="empty-icon"><Search size={20} /></div><h2>No projects found</h2><p>Try another search term or clear the search.</p><button className="button button-secondary" onClick={() => setQuery('')}>Clear search</button></div>
@@ -218,7 +306,7 @@ export default function App() {
                 <div className="empty-state">
                   <div className="empty-art"><div className="art-window"><div className="art-topline" /><div className="art-preview"><Film size={28} strokeWidth={1.2} /></div><div className="art-timeline"><i /><i /><i /></div></div><span className="art-spark spark-one" /><span className="art-spark spark-two" /></div>
                   <div className="eyebrow">A CLEAR START</div><h2>Make room for your next story.</h2><p>Create a project to begin. Your workspace stays on this device, and your original media remains untouched.</p>
-                  <button className="button button-primary" onClick={() => setShowCreate(true)}><Plus size={17} />Create your first project</button>
+                  <button className="button button-primary" onClick={() => setShowCreate(true)} disabled={!!persistenceWarning} title={persistenceWarning ? 'Resolve the storage warning before creating projects' : undefined}><Plus size={17} />Create your first project</button>
                   <span className="empty-footnote"><HardDrive size={13} />Project list stored in this browser profile</span>
                 </div>
               )}
@@ -247,7 +335,7 @@ export default function App() {
   );
 }
 
-function ProjectCard({ project, index, onOpen, onRename, onDuplicate, onArchive, onFavorite, onDelete }: { project: Project; index: number; onOpen: () => void; onRename: () => void; onDuplicate: () => void; onArchive: () => void; onFavorite: () => void; onDelete: () => void }) {
+function ProjectCard({ project, index, onOpen, onRename, onDuplicate, onArchive, onFavorite, onDelete, onDownload }: { project: Project; index: number; onOpen: () => void; onRename: () => void; onDuplicate: () => void; onArchive: () => void; onFavorite: () => void; onDelete: () => void; onDownload: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   return <article className="project-card" style={{ animationDelay: `${Math.min(index, 5) * 35}ms` }}>
     <button className={`project-thumb thumb-${index % 4}`} onClick={onOpen} aria-label={`Open ${project.name}`}>
@@ -262,7 +350,8 @@ function ProjectCard({ project, index, onOpen, onRename, onDuplicate, onArchive,
     {menuOpen && <><button className="click-away" aria-label="Close project menu" onClick={() => setMenuOpen(false)} /><div className="project-menu">
       <button onClick={() => { onOpen(); setMenuOpen(false); }}><FolderOpen size={14} />Open project</button>
       <button onClick={() => { onRename(); setMenuOpen(false); }}><FilePlus2 size={14} />Rename</button>
-      <button onClick={() => { onDuplicate(); setMenuOpen(false); }}><Grid2X2 size={14} />Duplicate entry</button>
+      <button onClick={() => { onDuplicate(); setMenuOpen(false); }}><Grid2X2 size={14} />Duplicate project</button>
+      <button onClick={() => { onDownload(); setMenuOpen(false); }}><Download size={14} />Download .cwproject</button>
       <button onClick={() => { onFavorite(); setMenuOpen(false); }}><Heart size={14} />{project.favorite ? 'Remove favourite' : 'Add to favourites'}</button>
       <button onClick={() => { onArchive(); setMenuOpen(false); }}><Archive size={14} />{project.archived ? 'Restore' : 'Archive'}</button>
       <div className="menu-divider" /><button className="danger-item" onClick={() => { onDelete(); setMenuOpen(false); }}><Trash2 size={14} />Delete entry</button>

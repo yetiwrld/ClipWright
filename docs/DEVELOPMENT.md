@@ -20,7 +20,7 @@ No `.env` file or credentials are needed. Do not add real credentials to `.env`;
 
 ## Current storage warning
 
-The foundation saves only small project-entry metadata and theme preferences in browser localStorage. Browser data can be cleared and entries are not standalone project files. Do not store important edits here or assume a project can be moved to another machine.
+The foundation saves project-entry metadata, validated v1 documents, and theme preferences in browser localStorage. Browser data can be cleared. A `.cwproject` download is a JSON snapshot, but the application cannot yet reopen it and no source media is embedded. Do not store important edits here or assume the downloaded document is a complete editing project.
 
 ## Working practices
 
