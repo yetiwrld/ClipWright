@@ -83,6 +83,28 @@ describe('ClipWright foundation UI', () => {
     const relinkedDocument = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
     expect(relinkedDocument[0].assets).toHaveLength(1);
     expect(relinkedDocument[0].assets[0].sourcePath).toBe('sample-relinked.mp4');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add selected source' }));
+    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 0' })).toBeTruthy();
+    let edited = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(edited[0].sequences[0].durationFrames).toBe(244);
+    expect(edited[0].sequences[0].tracks[0].clips[0]).toMatchObject({ timelineStartFrame: 0, timelineDurationFrames: 244 });
+
+    fireEvent.change(screen.getByLabelText('Timeline start frame'), { target: { value: '20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set' }));
+    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 20' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Add selected source' }));
+    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 264' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove selected clip' }));
+
+    edited = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(edited[0].sequences[0].durationFrames).toBe(264);
+    expect(edited[0].sequences[0].tracks[0].clips).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 20' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove selected clip' }));
+    edited = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(edited[0].sequences[0].durationFrames).toBe(0);
+    expect(edited[0].sequences[0].tracks[0].clips).toEqual([]);
   });
 
   it('rejects audio-only picks without creating a project media reference', async () => {

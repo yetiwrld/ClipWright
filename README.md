@@ -2,7 +2,7 @@
 
 ClipWright Studio is the starting point for a local-first Windows video editor and AI-assisted clipping application. The supplied ClipWright icon is included as a replaceable asset; the wordmark and Graphite + Electric Orange theme are deliberately easy to change.
 
-> **Current status — foundation build (0.1.0).** This is an early React + TypeScript application shell, not yet a Windows desktop editor. It has a local project dashboard, versioned project documents, `.cwproject` import/download, browser-local metadata inspection for selected video files, and an in-session source preview when the browser can decode the format. Project files never contain media bytes or temporary object URLs. Browser-picked media must be relinked after reload. Timeline editing/playback, transcoding, transcription, AI clipping, and rendering are not implemented.
+> **Current status — foundation build (0.1.0).** This is an early React + TypeScript application shell, not yet a Windows desktop editor. It has a local project dashboard, versioned project documents, `.cwproject` import/download, browser-local video metadata inspection and in-session source preview, plus a minimal frame-indexed video timeline (append, reposition without overlap, and remove). Project files never contain media bytes or temporary object URLs. Browser-picked media must be relinked after reload. Timeline playback, trimming, undo/redo, audio editing, transcoding, AI clipping, and rendering are not implemented.
 
 ## Run locally
 
@@ -31,11 +31,12 @@ npm run build
 - Select a local video file to inspect browser-reported duration and dimensions and preview it with native browser decoding and in-app playback/seek/volume controls.
 - Keep picked media available only for the current page session using a revocable object URL. The project document stores a filename-only `browser-session` reference and browser-reported metadata, never the bytes or temporary URL; relinking is required after reload.
 - `.cwproject` path references are not auto-resolved or verified. Imported video references can be relinked through the file picker.
+- Append the selected in-session video source to an unlocked video track, reposition clips by integer sequence-frame index without overlap, remove clips, and persist the resulting project document. Source-duration-to-sequence mapping is rounded from browser-reported duration; source preview remains separate from the timeline.
 - Migrate the foundation’s earlier project-list records into empty v1 documents; preserve unreadable data until the user confirms recovery.
 - Open, rename, duplicate, favourite, archive/restore, search, and delete project entries.
 - Deletion is confirmed and removes only local project entries/documents; it never deletes media.
 - Dark and light themes, keyboard shortcuts (`Ctrl/Cmd+K`, `Ctrl/Cmd+N`), a working command palette, and task-centre status.
-- Honest, explicit unavailable states for timeline editing, AI analysis, and export; browser-native source preview is available separately from the timeline.
+- Honest, explicit unavailable states for timeline playback, source trimming, undo/redo, AI analysis, and export; the current timeline supports only basic video clip placement.
 
 A `.cwproject` file is a portable JSON document that can be reopened by this foundation. It preserves supported project structure and references to source paths, but does not bundle media. Browser storage is interim and may be cleared; downloads are user-triggered snapshots rather than autosaved files, so do not rely on browser storage as the only copy of important work.
 
@@ -53,7 +54,7 @@ A `.cwproject` file is a portable JSON document that can be reopened by this fou
 1. Desktop shell and persistence contracts.
 2. Versioned project files, safe writes, and project dashboard storage.
 3. Browser-local video metadata and in-session source preview (implemented foundation; relink after reload).
-4. Frame-accurate sequence, timeline operations, undo/redo, and render vertical slice.
+4. Extend the minimal frame-indexed video timeline with trimming, undo/redo, timeline playback, then a verified render vertical slice.
 5. Transcription, explainable clip suggestions, and captions.
 6. Reframing, effects, audio, colour, recovery, and Windows distribution.
 

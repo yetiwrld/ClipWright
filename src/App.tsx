@@ -10,8 +10,9 @@ import {
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
-import type { MediaAsset, ProjectDocument, StreamInfo } from './lib/projectDocument';
+import type { MediaAsset, ProjectDocument, StreamInfo, VideoClip } from './lib/projectDocument';
 import { probeBrowserVideo } from './lib/browserMedia';
+import { appendVideoClip, moveVideoClip, removeVideoClip, sequenceDurationInFrames } from './lib/timelineOperations';
 
 type Workspace = 'home' | 'clipping' | 'editor';
 type Toast = { id: number; message: string; kind?: 'error' | 'success' };
@@ -47,6 +48,14 @@ function formatPlaybackTime(value: number) {
   const seconds = Math.floor((milliseconds % 60_000) / 1000);
   const millis = milliseconds % 1000;
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+}
+
+function formatRulerTime(frame: number, frameRate: { numerator: number; denominator: number }) {
+  const totalSeconds = Math.floor(frame * frameRate.denominator / frameRate.numerator);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  return hours ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 export default function App() {
@@ -236,6 +245,46 @@ export default function App() {
       setPendingRelinkAssetId(null);
       setIsReadingMedia(false);
     }
+  }
+
+  function applyTimelineEdit(projectId: string, edit: (document: ProjectDocument) => ProjectDocument, successMessage: string) {
+    if (persistenceWarning) {
+      notify('Resolve project storage before editing the timeline.', 'error');
+      return false;
+    }
+    const currentDocument = documents.find((document) => document.id === projectId);
+    if (!currentDocument) {
+      notify('The active project document is unavailable; the timeline was not changed.', 'error');
+      return false;
+    }
+    try {
+      const updatedDocument = edit(currentDocument);
+      serializeProjectDocument(updatedDocument);
+      setDocuments((current) => current.map((document) => document.id === projectId ? updatedDocument : document));
+      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, updatedAt: updatedDocument.metadata.modifiedAt } : project));
+      notify(successMessage);
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'The timeline edit could not be applied.', 'error');
+      return false;
+    }
+  }
+
+  function addVideoToTimeline(assetId: string) {
+    if (!activeProjectId) return null;
+    const clipId = crypto.randomUUID();
+    const applied = applyTimelineEdit(activeProjectId, (document) => appendVideoClip(document, document.projectSettings.defaultSequenceId, assetId, clipId), 'Added video source to the timeline.');
+    return applied ? clipId : null;
+  }
+
+  function moveTimelineClip(clipId: string, startFrame: number) {
+    if (!activeProjectId) return false;
+    return applyTimelineEdit(activeProjectId, (document) => moveVideoClip(document, document.projectSettings.defaultSequenceId, clipId, startFrame), 'Updated clip position.');
+  }
+
+  function deleteTimelineClip(clipId: string) {
+    if (!activeProjectId) return false;
+    return applyTimelineEdit(activeProjectId, (document) => removeVideoClip(document, document.projectSettings.defaultSequenceId, clipId), 'Removed clip from the timeline.');
   }
 
   function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate']) {
@@ -513,6 +562,9 @@ export default function App() {
             onImportVideo={() => requestVideoImport()}
             onRelinkVideo={(assetId) => requestVideoImport(assetId)}
             onSelectMedia={setSelectedMediaKey}
+            onAddVideo={addVideoToTimeline}
+            onMoveClip={moveTimelineClip}
+            onRemoveClip={deleteTimelineClip}
             onPlaybackError={() => notify('Browser playback failed. The file may use a codec this browser cannot decode.', 'error')}
           />}
           {workspace === 'clipping' && <ClippingFoundation onCreate={() => setShowCreate(true)} />}
@@ -592,6 +644,9 @@ function EditorFoundation({
   onImportVideo,
   onRelinkVideo,
   onSelectMedia,
+  onAddVideo,
+  onMoveClip,
+  onRemoveClip,
   onPlaybackError,
 }: {
   project: Project | null;
@@ -603,6 +658,9 @@ function EditorFoundation({
   onImportVideo: () => void;
   onRelinkVideo: (assetId: string) => void;
   onSelectMedia: (key: string) => void;
+  onAddVideo: (assetId: string) => string | null;
+  onMoveClip: (clipId: string, timelineStartFrame: number) => boolean;
+  onRemoveClip: (clipId: string) => boolean;
   onPlaybackError: () => void;
 }) {
   const sequence = projectDocument?.sequences.find((item) => item.id === projectDocument.projectSettings.defaultSequenceId) ?? null;
@@ -616,13 +674,34 @@ function EditorFoundation({
   const source = activeKey ? sessionSources[activeKey] : undefined;
   const stream = playableAsset?.streams.video;
   const metadataDuration = stream ? stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator : 0;
-  const savedClipCount = sequence?.tracks.reduce((total, track) => total + track.clips.length, 0) ?? 0;
+  const videoTracks = sequence?.tracks.filter((track) => track.kind === 'video') ?? [];
+  const audioTracks = sequence?.tracks.filter((track) => track.kind === 'audio') ?? [];
+  const videoClips = videoTracks.flatMap((track) => track.clips.filter((clip): clip is VideoClip => clip.kind === 'video'));
+  const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
+  const selectedClip = videoClips.find((clip) => clip.id === selectedTimelineClipId) ?? null;
+  const selectedClipTrack = selectedClip ? videoTracks.find((track) => track.clips.some((clip) => clip.id === selectedClip.id)) : null;
+  const selectedClipAsset = selectedClip ? assets.find((asset) => asset.id === selectedClip.assetId) : null;
+  const frameRateValue = sequence ? sequence.frameRate.numerator / sequence.frameRate.denominator : project?.frameRate ?? 30;
+  const sequenceDurationFrames = sequence ? Math.max(sequence.durationFrames, sequenceDurationInFrames(sequence)) : 0;
+  const timelineVisibleFrames = Math.max(sequenceDurationFrames, Math.ceil(frameRateValue * 20));
+  const timelineWidth = Math.max(540, Math.min(120_000, timelineVisibleFrames * 1.5));
+  const timelineContentWidth = timelineWidth - 32;
+  const timelinePixelsPerFrame = timelineContentWidth / timelineVisibleFrames;
+  const audioClipCount = audioTracks.reduce((total, track) => total + track.clips.filter((clip) => clip.kind === 'audio').length, 0);
+  const tenSecondTick = Math.max(1, Math.round(frameRateValue * 10));
+  const tickInterval = tenSecondTick * Math.max(1, Math.ceil(timelineVisibleFrames / tenSecondTick / 80));
+  const timelineTicks = Array.from({ length: Math.floor(timelineVisibleFrames / tickInterval) + 1 }, (_, index) => index * tickInterval);
+  const [startFrameDraft, setStartFrameDraft] = useState('0');
   const videoRef = useRef<HTMLVideoElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.8);
   const [playbackError, setPlaybackError] = useState(false);
+
+  useEffect(() => {
+    setStartFrameDraft(String(selectedClip?.timelineStartFrame ?? 0));
+  }, [selectedClip?.id, selectedClip?.timelineStartFrame]);
 
   useEffect(() => {
     setCurrentTime(0);
@@ -647,6 +726,27 @@ function EditorFoundation({
     if (video.paused) {
       void video.play().catch(() => { setPlaybackError(true); onPlaybackError(); });
     } else video.pause();
+  }
+
+  function addSelectedSourceToTimeline() {
+    if (!source || !playableAsset) return;
+    const clipId = onAddVideo(playableAsset.id);
+    if (clipId) setSelectedTimelineClipId(clipId);
+  }
+
+  function removeSelectedClip() {
+    if (selectedClip && onRemoveClip(selectedClip.id)) setSelectedTimelineClipId(null);
+  }
+
+  function applyStartFrame() {
+    if (!selectedClip || !/^\d+$/.test(startFrameDraft)) {
+      setStartFrameDraft(String(selectedClip?.timelineStartFrame ?? 0));
+      return;
+    }
+    const nextStartFrame = Number(startFrameDraft);
+    if (!Number.isSafeInteger(nextStartFrame) || nextStartFrame < 0 || !onMoveClip(selectedClip.id, nextStartFrame)) {
+      setStartFrameDraft(String(selectedClip.timelineStartFrame));
+    }
   }
 
   return <section className="editor-foundation">
@@ -704,10 +804,68 @@ function EditorFoundation({
           <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
           <span className="preview-quality">Browser preview</span>
         </div>
-        <div className="timeline-panel"><div className="timeline-heading"><div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div><div className="timeline-tools"><button disabled title="Split clip unavailable"><Keyboard size={14} /></button><button disabled title="Fit timeline unavailable"><LayoutPanelLeft size={14} /></button></div></div><div className="timeline-ruler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:40</span><span>00:50</span></div><div className="track-row"><span className="track-name">V1</span><div className="track-space"><div className="empty-track"><span>Add video to start editing</span><Plus size={14} /></div></div></div><div className="track-row audio-track"><span className="track-name">A1</span><div className="track-space"><div className="empty-audio"><span>Audio track</span></div></div></div><div className="timeline-note">{savedClipCount ? `This project document contains ${savedClipCount} clip entries; timeline rendering and editing are not implemented.` : 'Source playback is separate from the timeline. Editing and export are not available yet.'}</div></div>
+        <div className="timeline-panel">
+          <div className="timeline-heading">
+            <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
+            <div className="timeline-tools">
+              <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
+              <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
+              <button type="button" disabled title="Timeline zoom is not available yet"><LayoutPanelLeft size={14} /></button>
+            </div>
+          </div>
+          {sequence ? <div className="timeline-scroll" aria-label="Timeline tracks">
+            <div className="timeline-canvas" style={{ width: timelineWidth }}>
+              <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
+                {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
+              </div>
+              {videoTracks.map((track, trackIndex) => {
+                const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
+                return <div className="track-row" key={track.id}>
+                  <span className="track-name" title={track.name}>V{trackIndex + 1}</span>
+<div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
+                    {clips.length ? clips.map((clip) => {
+                      const asset = assets.find((item) => item.id === clip.assetId);
+                      return <button
+                        className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
+                        type="button"
+                        key={clip.id}
+                        style={{ left: clip.timelineStartFrame * timelinePixelsPerFrame, width: Math.max(3, clip.timelineDurationFrames * timelinePixelsPerFrame) }}
+                        aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
+                        aria-pressed={selectedTimelineClipId === clip.id}
+                        title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
+                        onClick={() => setSelectedTimelineClipId(clip.id)}
+                      >{asset?.name ?? 'Video clip'}</button>;
+                    }) : <div className="empty-track"><span>Select a source above, then choose “Add selected source”</span></div>}
+                  </div>
+                </div>;
+              })}
+              {audioTracks.map((track, trackIndex) => <div className="track-row audio-track" key={track.id}>
+                <span className="track-name" title={track.name}>A{trackIndex + 1}</span>
+                <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}><div className="empty-audio"><span>Audio lane editing unavailable</span></div></div>
+              </div>)}
+            </div>
+          </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
+          <div className="timeline-note">Clip placement and sequence length use integer frames. Source preview above is separate; timeline playback, trimming, undo/redo, and export are not included.</div>
+          {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
+        </div>
         <p className="preview-disclaimer">Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.</p>
       </div>
-      <aside className="properties-panel"><div className="panel-title">Properties</div><div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a clip in the timeline to view its properties.</span></div><div className="properties-divider"/><div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><small>Settings are loaded from the validated project document.</small></div></aside>
+      <aside className="properties-panel">
+        <div className="panel-title">Properties</div>
+        {selectedClip ? <div className="property-section selected-clip-properties">
+          <span className="panel-kicker">VIDEO CLIP</span>
+          <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
+          <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
+          <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
+          <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
+            <label htmlFor="clip-start-frame">Timeline start frame</label>
+            <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
+          </form>
+          <small>Source trims, clip speed changes, and audio edits are not available yet.</small>
+        </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
+        <div className="properties-divider"/>
+        <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
+      </aside>
     </div>
     <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>
   </section>;

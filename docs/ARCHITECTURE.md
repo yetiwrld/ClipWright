@@ -4,7 +4,7 @@ Status: foundation only. These decisions establish seams and priorities, not a c
 
 ## Current implementation
 
-The current runnable increment is a TypeScript/React renderer built with Vite. Workspace selection is held in React state. Project-list records pass through `src/lib/projects.ts`, which validates their basic shape before reading localStorage. The localStorage adapter is intentionally isolated so it can be replaced by a desktop persistence adapter. The current browser app does **not** expose unrestricted filesystem or shell APIs. A version-1 `ProjectDocument` is used by project creation, local-file open/import, and user-triggered `.cwproject` JSON downloads. Project payloads remain in a separate browser-local storage key; see [the schema and storage limitations](PROJECT_SCHEMA.md).
+The current runnable increment is a TypeScript/React renderer built with Vite. Workspace selection is held in React state. Project-list records pass through `src/lib/projects.ts`, which validates their basic shape before reading localStorage. The localStorage adapter is intentionally isolated so it can be replaced by a desktop persistence adapter. The current browser app does **not** expose unrestricted filesystem or shell APIs. A version-1 `ProjectDocument` is used by project creation, local-file open/import, and user-triggered `.cwproject` JSON downloads. Project payloads remain in a separate browser-local storage key; see [the schema and storage limitations](PROJECT_SCHEMA.md). Video files can be selected in the browser for metadata and source preview using a temporary in-memory object URL; no durable local path or media bytes are saved, so the source must be relinked after reload.
 
 ## Target Windows architecture
 
@@ -15,7 +15,7 @@ Adopt an Electron desktop shell around the existing renderer, retaining a web de
 - **Renderer:** React + TypeScript UI, design system, project views, command palette, accessible controls. All state crossing IPC is validated.
 - **Project core:** versioned JSON project document with stable IDs, schema validation/migration, integer video-frame positions/rational timebases, and separate audio sample timing. V1 is implemented; atomic desktop-file saves and rotating recovery checkpoints are not. Browser storage/downloads are interim, not the future managed project-file adapter.
 - **Media services:** dedicated probe/import and thumbnail/waveform workers. Probe candidate: FFmpeg/ffprobe, subject to Windows packaging, codec configuration, licensing, and fixture tests. Keep original media immutable; references and proxies are separate.
-- **Editing core:** pure timeline commands over the project model, command-based undo/redo, deterministic frame/time conversion, and unit/integration tests independent of UI.
+- **Editing core:** the browser foundation currently has pure append, reposition, and remove commands for video clips; reposition uses integer frames and rejects same-track overlap. Undo/redo, source trims, audio editing, and full UI-independent editing command history remain future work.
 - **Preview/render:** preview and final render consume the same project instructions where feasible. Isolate decoder/encoder processes from the UI thread. An FFmpeg filter graph may serve a verified initial export path, but does not itself supply the editor model or full real-time compositor.
 - **Tasks:** durable task records and worker adapters expose real stages/progress only when measured. Cancellation/retry/pause semantics are declared per task capability.
 - **AI providers:** typed capability interfaces, local provider first where feasible, opt-in cloud providers behind explicit consent and secure credential storage. No provider or model is currently included.
@@ -39,4 +39,4 @@ Adopt an Electron desktop shell around the existing renderer, retaining a web de
 
 ## Next architecture gate
 
-Before the editor vertical slice, create and document the v1 project schema and migration policy, select an initial media-probe/render approach after licensing review, and add representative local media fixtures. Do not extend the placeholder editor UI into fake timeline functionality.
+The v1 project schema, browser-local source preview, and a minimal pure timeline command set (append, frame-indexed reposition with overlap checks, and removal) now exist. Before expanding editing, add fixture-based tests for trims/undo and decide how timeline playback will align with a future renderer. Before claiming broader media compatibility, add representative local media fixtures and review a container-aware probe/render approach and its licensing/package implications. The current browser source preview remains separate from the timeline.

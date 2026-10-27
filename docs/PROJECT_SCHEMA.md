@@ -1,6 +1,6 @@
 # ClipWright project document schema — v1
 
-Status: implemented as a validated TypeScript data contract; integrated with project creation, browser-local document storage, `.cwproject` downloads/import, and session-only browser-picked video metadata/source preview. Imported project paths are not auto-resolved, but video references can be relinked via the file picker. Timeline mutation, atomic filesystem writes, and crash recovery are not yet implemented.
+Status: implemented as a validated TypeScript data contract; integrated with project creation, browser-local document storage, `.cwproject` downloads/import, session-only browser-picked video metadata/source preview, and basic persisted video clip placement/reposition/removal. Imported project paths are not auto-resolved, but video references can be relinked via the file picker. Atomic filesystem writes and crash recovery are not yet implemented.
 
 ## Why two stores exist
 
@@ -24,11 +24,11 @@ Rationals use `{ "numerator": n, "denominator": d }` with positive safe integers
 
 `validateProjectDocument` checks required fields, supported schema version, safe integer timing, rational denominators, dimensions/rates, unique IDs, track/clip kind agreement, media references, stream presence, source boundaries, default-sequence references, and video clip bounds against sequence duration. `serializeProjectDocument` refuses invalid structures; `parseProjectDocument` reports malformed JSON or field-specific validation failures. Unknown future schema versions are rejected instead of being silently rewritten.
 
-The format currently represents only the editing foundation: media references, sequence settings, and basic video/audio clip placement. Effects, transitions, titles, captions, keyframes, colour/audio processing, project history, proxy state, and renderer compatibility metadata remain future schema additions, not implied capabilities.
+The current UI can append a full-length video source to an unlocked video track, reposition a video clip to an integer frame without overlapping another clip on that track, and remove it. These operations update and validate the same project document persisted by the existing browser-local store. Source trims, split/edge edits, undo/redo, audio-lane editing, effects, transitions, titles, captions, keyframes, colour/audio processing, project history, proxy state, and renderer compatibility metadata are not implemented.
 
 ## Browser-picked video references
 
-The Editor can create a `browser-session` video asset from a user-selected `File`. The document stores the selected file's basename and browser-reported size, width, height, and duration. The observed duration is represented in rounded microsecond ticks (`timeBase: 1/1,000,000`) and tagged `metadataSource: "browser"`; no frame rate is inferred from this metadata. These are browser media-element values, not verified container timestamps or a frame-accurate probe.
+The Editor can create a `browser-session` video asset from a user-selected `File`. The document stores the selected file's basename and browser-reported size, width, height, and duration. The observed duration is represented in rounded microsecond ticks (`timeBase: 1/1,000,000`) and tagged `metadataSource: "browser"`; no frame rate is inferred from this metadata. These are browser media-element values, not verified container timestamps or a frame-accurate probe. When placing a source on a sequence, its full duration is rounded to the nearest sequence frame for `timelineDurationFrames`; source ticks remain stored separately, and no clip trimming is performed.
 
 The actual `File` is referenced through a temporary `blob:` object URL kept only in app memory and revoked when replaced, deleted, or when the app is left. The URL and media bytes are never written to localStorage or a `.cwproject`. Ordinary browser file pickers do not expose a durable local path, so every session-only source must be relinked after reload. Existing absolute/project-relative paths imported from project files are not checked automatically; users can relink video assets by selecting the corresponding local file.
 

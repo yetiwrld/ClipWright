@@ -8,7 +8,8 @@ This is an early browser-based editing foundation, not a complete video editor.
 - Source preview uses the browser's `<video>` element. Playback depends on the exact container/codec support of the current browser and operating system; selection or metadata inspection does not guarantee decodability. No transcoding, complete codec probe, or codec-independent playback is provided.
 - Browser duration is rounded to a microsecond-based project timebase and tagged as browser-reported metadata. Browser-reported values are not container-verified; frame rate is not inferred. Preview scrubbing uses browser media-element seeking and is not frame-accurate.
 - Imported `.cwproject` media paths are not automatically verified or resolved. Video assets can be relinked manually; direct picker-based ingestion/preview for audio-only files and images is not supported in this increment.
-- Timeline mutation, timeline playback, clip editing, undo/redo, effects, captions, audio processing, AI analysis, rendering, and export are not implemented. The source preview is separate from the timeline.
+- The minimal video timeline can append a full-length selected source, move clips to integer sequence-frame positions without overlap, remove clips, and persist the resulting document. Browser-reported source duration is rounded to sequence frames; this is not a container-verified source trim or frame-accurate preview.
+- Timeline playback/scrubbing, source trimming, splitting, undo/redo, audio-track editing/rendering, effects, captions, AI analysis, rendering, and export are not implemented. The browser source preview remains separate from the timeline.
 - No FFmpeg binary/library, AI model, cloud provider, database, plugin system, telemetry, or credential store is included.
 - The generated project card background is visual decoration only, not a real media thumbnail.
 - The icon asset was supplied by the requester, but its redistribution rights are unverified.
