@@ -795,6 +795,8 @@ function EditorFoundation({
   const editorLayoutRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const timelineTrackHeaderRowsRef = useRef<HTMLDivElement>(null);
+  const timelinePlayheadRef = useRef<HTMLDivElement>(null);
+  const playheadPointerRef = useRef<number | null>(null);
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
   const timelineHeightRef = useRef(280);
   const [editorLayoutSize, setEditorLayoutSize] = useState({ width: 0, height: 0 });
@@ -870,6 +872,34 @@ function EditorFoundation({
     videoRef.current.playbackRate = rate;
   }, [timelineSyncClip?.id, timelineSyncClip?.playbackRate.numerator, timelineSyncClip?.playbackRate.denominator, source?.url]);
 
+  useEffect(() => {
+    if (!isPlaying || !timelineSyncClip) return;
+    const syncAsset = assets.find((item) => item.id === timelineSyncClip.assetId);
+    const timeBase = syncAsset?.streams.video?.timeBase;
+    if (!timeBase) return;
+    let animationFrame = 0;
+    let lastReadoutUpdate = 0;
+    const sourceInSeconds = timelineSyncClip.sourceInTick * timeBase.numerator / timeBase.denominator;
+    const playbackRate = timelineSyncClip.playbackRate.numerator / timelineSyncClip.playbackRate.denominator;
+    const clipEndFrame = timelineSyncClip.timelineStartFrame + timelineSyncClip.timelineDurationFrames;
+    const animatePlayhead = (now: number) => {
+      const video = videoRef.current;
+      const playhead = timelinePlayheadRef.current;
+      if (video && playhead) {
+        const elapsed = Math.max(0, video.currentTime - sourceInSeconds) / playbackRate * frameRateValue;
+        const frame = Math.min(clipEndFrame, timelineSyncClip.timelineStartFrame + elapsed);
+        playhead.style.transform = `translateX(${frame * timelinePixelsPerFrame}px)`;
+        if (now - lastReadoutUpdate >= 100) {
+          setTimelinePlayheadFrame(Math.floor(frame));
+          lastReadoutUpdate = now;
+        }
+      }
+      animationFrame = window.requestAnimationFrame(animatePlayhead);
+    };
+    animationFrame = window.requestAnimationFrame(animatePlayhead);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [isPlaying, timelineSyncClip?.id, timelineSyncClip?.timelineStartFrame, timelineSyncClip?.timelineDurationFrames, timelineSyncClip?.sourceInTick, timelineSyncClip?.playbackRate.numerator, timelineSyncClip?.playbackRate.denominator, frameRateValue, timelinePixelsPerFrame]);
+
   function seekBy(seconds: number) {
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration)) return;
@@ -895,6 +925,7 @@ function EditorFoundation({
     if (!sequence) return;
     const frame = Math.max(0, Math.min(timelineCanvasFrames, Math.round(requestedFrame)));
     setTimelinePlayheadFrame(frame);
+    if (timelinePlayheadRef.current) timelinePlayheadRef.current.style.transform = `translateX(${frame * timelinePixelsPerFrame}px)`;
     const clip = videoClips.find((item) => frame >= item.timelineStartFrame && frame < item.timelineStartFrame + item.timelineDurationFrames);
     if (!clip || !projectDocument) {
       setTimelineSyncClipId(null);
@@ -930,11 +961,48 @@ function EditorFoundation({
     }
   }
 
-  function handleTimelineClick(event: React.MouseEvent<HTMLDivElement>) {
-    const canvas = event.currentTarget.querySelector('.timeline-canvas');
+  function seekTimelineAtClientX(clientX: number) {
+    const canvas = timelineScrollRef.current?.querySelector('.timeline-canvas');
     if (!canvas) return;
-    const frame = (event.clientX - canvas.getBoundingClientRect().left) / timelinePixelsPerFrame;
+    const frame = (clientX - canvas.getBoundingClientRect().left) / timelinePixelsPerFrame;
     seekTimelineFrame(frame);
+  }
+
+  function handleTimelineClick(event: React.MouseEvent<HTMLDivElement>) {
+    seekTimelineAtClientX(event.clientX);
+  }
+
+  function beginPlayheadDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    playheadPointerRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    seekTimelineAtClientX(event.clientX);
+  }
+
+  function movePlayheadDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    if (playheadPointerRef.current !== event.pointerId) return;
+    event.preventDefault();
+    seekTimelineAtClientX(event.clientX);
+  }
+
+  function endPlayheadDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    if (playheadPointerRef.current !== event.pointerId) return;
+    playheadPointerRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function handlePlayheadKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    const step = event.shiftKey ? 10 : 1;
+    const nextFrame = event.key === 'ArrowLeft' ? timelinePlayheadFrame - step
+      : event.key === 'ArrowRight' ? timelinePlayheadFrame + step
+        : event.key === 'Home' ? 0
+          : event.key === 'End' ? timelineCanvasFrames
+            : null;
+    if (nextFrame === null) return;
+    event.preventDefault();
+    seekTimelineFrame(nextFrame);
   }
 
   function handlePreviewTimeUpdate(event: React.SyntheticEvent<HTMLVideoElement>) {
@@ -1238,7 +1306,24 @@ function EditorFoundation({
                 {audioTracks.map((track) => <div className="track-row audio-track" key={track.id}>
                   <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}><div className="empty-audio"><span>Audio lane editing unavailable</span></div></div>
                 </div>)}
-                <div className="timeline-playhead" aria-hidden="true" style={{ left: timelinePlayheadFrame * timelinePixelsPerFrame }} />
+                <div ref={timelinePlayheadRef} className="timeline-playhead" style={{ transform: `translateX(${timelinePlayheadFrame * timelinePixelsPerFrame}px)` }}>
+                  <button
+                    className="timeline-playhead-grab"
+                    type="button"
+                    role="slider"
+                    aria-label="Timeline playhead"
+                    aria-valuemin={0}
+                    aria-valuemax={timelineCanvasFrames}
+                    aria-valuenow={timelinePlayheadFrame}
+                    aria-valuetext={formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}
+                    onPointerDown={beginPlayheadDrag}
+                    onPointerMove={movePlayheadDrag}
+                    onPointerUp={endPlayheadDrag}
+                    onPointerCancel={endPlayheadDrag}
+                    onKeyDown={handlePlayheadKeyDown}
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                </div>
               </div>
             </div>
           </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
