@@ -40,6 +40,10 @@ describe('ClipWright foundation UI', () => {
       'preview-stage',
       'preview-controls',
     ]);
+    expect(container.querySelector('.content-area-editor')).toBeTruthy();
+    const propertiesBody = container.querySelector('.properties-body');
+    expect(propertiesBody?.parentElement).toBe(container.querySelector('.properties-panel'));
+    expect(propertiesBody?.previousElementSibling?.textContent).toBe('Properties');
     expect(container.querySelector('.timeline-panel')?.parentElement).toBe(container.querySelector('.editor-layout'));
     expect([...container.querySelectorAll('.timeline-track-layout > *')].map((element) => element.className)).toEqual([
       'timeline-track-header-column',

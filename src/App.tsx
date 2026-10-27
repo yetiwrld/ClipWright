@@ -605,7 +605,7 @@ export default function App() {
           <div className="head-status"><span className={`status-dot ${persistenceWarning ? 'status-warning' : ''}`} />{persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'}</div>
         </div>
 
-        <main className="content-area">
+        <main className={`content-area ${workspace === 'editor' ? 'content-area-editor' : ''}`}>
           {workspace === 'home' && (
             <section className="dashboard-view">
               <div className="welcome-row">
@@ -1016,24 +1016,26 @@ function EditorFoundation({
       </div>
       <aside className="properties-panel">
         <div className="panel-title">Properties</div>
-        {selectedClip ? <div className="property-section selected-clip-properties">
-          <span className="panel-kicker">VIDEO CLIP</span>
-          <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
-          <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
-          <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
-          <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
-            <label htmlFor="clip-start-frame">Timeline start frame</label>
-            <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
-          </form>
-          {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
-            <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
-            <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
-            <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
-          </form>}
-          <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
-        </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
-        <div className="properties-divider"/>
-        <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
+        <div className="properties-body">
+          {selectedClip ? <div className="property-section selected-clip-properties">
+            <span className="panel-kicker">VIDEO CLIP</span>
+            <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
+            <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
+            <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
+            <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
+              <label htmlFor="clip-start-frame">Timeline start frame</label>
+              <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
+            </form>
+            {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
+              <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+              <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+              <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
+            </form>}
+            <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
+          </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
+          <div className="properties-divider"/>
+          <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
+        </div>
       </aside>
         <div
           className="timeline-resize-handle"
