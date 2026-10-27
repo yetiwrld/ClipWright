@@ -44,12 +44,13 @@ const mediaKey = (projectId: string, assetId: string) => JSON.stringify([project
 const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
 const TIMELINE_ZOOM_KEY = 'clipwright.workspace.timeline-zoom';
 const TIMELINE_MIN_HEIGHT = 180;
+const TIMELINE_DEFAULT_HEIGHT = 360;
 
 function readTimelineHeight() {
   try {
     const value = Number(window.localStorage.getItem(TIMELINE_HEIGHT_KEY));
-    return Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT ? value : 280;
-  } catch { return 280; }
+    return Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT ? value : TIMELINE_DEFAULT_HEIGHT;
+  } catch { return TIMELINE_DEFAULT_HEIGHT; }
 }
 
 function storeTimelineHeight(value: number) {
@@ -811,7 +812,6 @@ function EditorFoundation({
   const timelinePixelsPerFrame = Math.max(0.001, timelineAvailableWidth / timelineVisibleFrames * timelineZoom);
   const timelineCanvasFrames = Math.max(timelineVisibleFrames, Math.ceil(timelineAvailableWidth / timelinePixelsPerFrame));
   const timelineContentWidth = Math.min(119_850, Math.max(200, Math.ceil(timelineCanvasFrames * timelinePixelsPerFrame)));
-  const audioClipCount = audioTracks.reduce((total, track) => total + track.clips.filter((clip) => clip.kind === 'audio').length, 0);
   const tickSeconds = niceRulerIntervalSeconds(80 / Math.max(0.001, timelinePixelsPerFrame * frameRateValue));
   const tickInterval = Math.max(1, Math.round(frameRateValue * tickSeconds));
   const timelineTicks = Array.from({ length: Math.min(2_000, Math.floor(timelineCanvasFrames / tickInterval) + 1) }, (_, index) => index * tickInterval);
@@ -1327,8 +1327,6 @@ function EditorFoundation({
               </div>
             </div>
           </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
-          <div className="timeline-note">Placement uses sequence frames; trims use source ticks. Click a clip to cue it and click a lane to seek; preview playback follows the selected clip's trim. Undo/redo is session-only. Playback across cuts, audio mixing, and export are not included.</div>
-          {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
         </div>
     </div>
     <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>

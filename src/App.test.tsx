@@ -45,6 +45,8 @@ describe('ClipWright foundation UI', () => {
     expect(propertiesBody?.parentElement).toBe(container.querySelector('.properties-panel'));
     expect(propertiesBody?.previousElementSibling?.textContent).toBe('Properties');
     expect(container.querySelector('.timeline-panel')?.parentElement).toBe(container.querySelector('.editor-layout'));
+    expect(Number(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow'))).toBeGreaterThanOrEqual(350);
+    expect(container.querySelectorAll('.timeline-note')).toHaveLength(0);
     expect([...container.querySelectorAll('.timeline-track-layout > *')].map((element) => element.className)).toEqual([
       'timeline-track-header-column',
       'timeline-scroll',
@@ -53,9 +55,11 @@ describe('ClipWright foundation UI', () => {
     const trackHeaders = container.querySelector('.timeline-track-header-rows') as HTMLDivElement;
     fireEvent.scroll(timelineScroller, { target: { scrollTop: 42, scrollLeft: 50 } });
     expect(trackHeaders.style.transform).toBe('translateY(-42px)');
-    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize timeline height' }), { key: 'ArrowUp' });
-    expect(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow')).toBe('296');
-    expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe('296');
+    const timelineResizer = screen.getByRole('separator', { name: 'Resize timeline height' });
+    const startingTimelineHeight = Number(timelineResizer.getAttribute('aria-valuenow'));
+    fireEvent.keyDown(timelineResizer, { key: 'ArrowDown' });
+    expect(Number(timelineResizer.getAttribute('aria-valuenow'))).toBe(startingTimelineHeight - 16);
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe(String(startingTimelineHeight - 16));
     fireEvent.change(screen.getByRole('slider', { name: 'Timeline zoom level' }), { target: { value: '2' } });
     expect(screen.getByText('200%')).toBeTruthy();
     expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('2');

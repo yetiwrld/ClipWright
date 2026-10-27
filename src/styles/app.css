@@ -181,7 +181,6 @@ h1, h2, h3, p { margin-top: 0; }
 .timeline-clip:hover, .timeline-clip.is-selected { z-index: 2; border-color: var(--accent); background: rgba(255, 116, 24, .32); box-shadow: 0 0 0 1px rgba(255, 116, 24, .18); }
 .audio-track { height: 56px; }.audio-track .empty-audio { width: 100%; height: 30px; display: flex; align-items: center; padding-left: 9px; border: 1px dashed #39413a; border-radius: 3px; color: #727d73; background: rgba(118,198,154,.035); font-size: 8px; }
 .timeline-empty { padding: 30px 12px; color: var(--text-muted); font-size: 10px; }
-.timeline-note { padding: 9px 0 2px 34px; color: #73746f; font-size: 9px; line-height: 1.5; }
 .selected-clip-name { display: block; margin: 8px 0; color: var(--text-primary); font-size: 11px; font-weight: 550; overflow-wrap: anywhere; }
 .frame-position-form { margin-top: 14px; }
 .frame-position-form label { display: block; margin-bottom: 6px; color: var(--text-muted); font-size: 9px; }
