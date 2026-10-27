@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive, ArrowLeft, ArrowRight, Check, ChevronDown, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
+  Pause, Play, SkipBack, SkipForward, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, LayoutPanelLeft, ListFilter,
   MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload,
   X, type LucideIcon,
@@ -9,7 +10,8 @@ import {
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
-import type { ProjectDocument } from './lib/projectDocument';
+import type { MediaAsset, ProjectDocument, StreamInfo } from './lib/projectDocument';
+import { probeBrowserVideo } from './lib/browserMedia';
 
 type Workspace = 'home' | 'clipping' | 'editor';
 type Toast = { id: number; message: string; kind?: 'error' | 'success' };
@@ -33,6 +35,18 @@ function aspectRatioOf(width: number, height: number) {
   const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
   const divisor = gcd(width, height);
   return `${width / divisor}:${height / divisor}`;
+}
+
+type SessionMediaSource = { url: string; name: string };
+const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
+
+function formatPlaybackTime(value: number) {
+  const milliseconds = Math.max(0, Math.floor((Number.isFinite(value) ? value : 0) * 1000));
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const seconds = Math.floor((milliseconds % 60_000) / 1000);
+  const millis = milliseconds % 1000;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
 }
 
 export default function App() {
@@ -62,8 +76,14 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [toast, setToast] = useState<Toast | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('clipwright.theme') === 'light' ? 'light' : 'dark');
+  const [sessionSources, setSessionSources] = useState<Record<string, SessionMediaSource>>({});
+  const sessionSourcesRef = useRef<Record<string, SessionMediaSource>>({});
+  const [selectedMediaKey, setSelectedMediaKey] = useState<string | null>(null);
+  const [pendingRelinkAssetId, setPendingRelinkAssetId] = useState<string | null>(null);
+  const [isReadingMedia, setIsReadingMedia] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const projectFileInputRef = useRef<HTMLInputElement>(null);
+  const videoFileInputRef = useRef<HTMLInputElement>(null);
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const persistenceWarning = storageWarning ?? documentStorageWarning;
@@ -96,6 +116,10 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
+  useEffect(() => () => {
+    for (const source of Object.values(sessionSourcesRef.current)) URL.revokeObjectURL(source.url);
+  }, []);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -116,6 +140,102 @@ export default function App() {
     const id = Date.now();
     setToast({ id, message, kind });
     window.setTimeout(() => setToast((current) => current?.id === id ? null : current), 3200);
+  }
+
+  function requestVideoImport(assetId?: string) {
+    if (!activeProjectId || persistenceWarning) {
+      notify('Open a project with writable browser storage before importing video.', 'error');
+      return;
+    }
+    setPendingRelinkAssetId(assetId ?? null);
+    videoFileInputRef.current?.click();
+  }
+
+  async function importVideoFile(file: File | null) {
+    if (!file) { setPendingRelinkAssetId(null); return; }
+    const projectId = activeProjectId;
+    const project = projects.find((entry) => entry.id === projectId);
+    const projectDocument = documents.find((entry) => entry.id === projectId);
+    if (!project || !projectDocument) {
+      setPendingRelinkAssetId(null);
+      notify('The active project document is unavailable; video was not imported.', 'error');
+      return;
+    }
+    if (file.type.startsWith('audio/')) {
+      setPendingRelinkAssetId(null);
+      notify('Audio-only ingestion is not supported yet. Select a video file.', 'error');
+      return;
+    }
+    const targetAsset = pendingRelinkAssetId
+      ? projectDocument.assets.find((asset) => asset.id === pendingRelinkAssetId && asset.kind === 'video')
+      : undefined;
+    if (pendingRelinkAssetId && !targetAsset) {
+      setPendingRelinkAssetId(null);
+      notify('This project has no matching video asset to relink.', 'error');
+      return;
+    }
+
+    const safeFileName = file.name.split(/[\\/]/).filter(Boolean).pop()?.replace(/[<>:"|?*]/g, '-').replace(/[\x00-\x1f]/g, '-').slice(0, 200) || 'video';
+    let objectUrl: string | null = null;
+    setIsReadingMedia(true);
+    try {
+      objectUrl = URL.createObjectURL(file);
+      const metadata = await probeBrowserVideo(objectUrl);
+      const timeBase = targetAsset?.streams.video?.timeBase ?? metadata.timeBase;
+      const videoStream: StreamInfo = {
+        timeBase,
+        durationTicks: targetAsset
+          ? Math.round(metadata.durationSeconds * timeBase.denominator / timeBase.numerator)
+          : metadata.durationTicks,
+        width: metadata.width,
+        height: metadata.height,
+        metadataSource: 'browser',
+      };
+      const asset: MediaAsset = targetAsset
+        ? {
+          ...targetAsset,
+          name: safeFileName,
+          sourcePath: safeFileName,
+          pathKind: 'browser-session',
+          fileSizeBytes: file.size,
+          streams: { ...targetAsset.streams, video: videoStream },
+        }
+        : {
+          id: crypto.randomUUID(),
+          name: safeFileName,
+          sourcePath: safeFileName,
+          pathKind: 'browser-session',
+          kind: 'video',
+          streams: { video: videoStream },
+          fileSizeBytes: file.size,
+        };
+      const updatedDocument: ProjectDocument = {
+        ...projectDocument,
+        metadata: { ...projectDocument.metadata, modifiedAt: new Date().toISOString() },
+        assets: targetAsset
+          ? projectDocument.assets.map((entry) => entry.id === targetAsset.id ? asset : entry)
+          : [...projectDocument.assets, asset],
+      };
+      serializeProjectDocument(updatedDocument); // Validate before changing either persisted project store.
+
+      const key = mediaKey(projectId!, asset.id);
+      const oldUrl = sessionSourcesRef.current[key]?.url;
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName } };
+      sessionSourcesRef.current = nextSources;
+      setSessionSources(nextSources);
+      setDocuments((current) => current.map((entry) => entry.id === projectId ? updatedDocument : entry));
+      setProjects((current) => current.map((entry) => entry.id === projectId ? { ...entry, updatedAt: updatedDocument.metadata.modifiedAt } : entry));
+      setSelectedMediaKey(key);
+      objectUrl = null; // The session source registry now owns the URL and revokes it on replacement/unmount.
+      notify(`Metadata read · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not read video metadata in this browser.', 'error');
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setPendingRelinkAssetId(null);
+      setIsReadingMedia(false);
+    }
   }
 
   function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate']) {
@@ -280,8 +400,21 @@ export default function App() {
     const confirmed = window.confirm(`Delete “${project.name}” from this project list? This removes only its local project entry; it does not delete source media.`);
     if (!confirmed) return;
     setProjects((current) => current.filter((item) => item.id !== project.id));
+    const removedDocument = documents.find((document) => document.id === project.id);
+    if (removedDocument) {
+      for (const asset of removedDocument.assets) {
+        const key = mediaKey(project.id, asset.id);
+        const source = sessionSourcesRef.current[key];
+        if (source) URL.revokeObjectURL(source.url);
+      }
+      const nextSources = { ...sessionSourcesRef.current };
+      for (const asset of removedDocument.assets) delete nextSources[mediaKey(project.id, asset.id)];
+      sessionSourcesRef.current = nextSources;
+      setSessionSources(nextSources);
+    }
     setDocuments((current) => current.filter((document) => document.id !== project.id));
     if (activeProjectId === project.id) { setActiveProjectId(null); setWorkspace('home'); }
+    if (removedDocument?.assets.some((asset) => mediaKey(project.id, asset.id) === selectedMediaKey)) setSelectedMediaKey(null);
     notify('Project entry deleted. Source media was left untouched.');
   }
 
@@ -370,12 +503,24 @@ export default function App() {
             </section>
           )}
 
-          {workspace === 'editor' && <EditorFoundation project={activeProject} projectDocument={documents.find((document) => document.id === activeProjectId) ?? null} onBack={() => navigate('home')} onImportUnavailable={() => notify('Media import is the next implementation milestone; no files have been changed.', 'error')} />}
+          {workspace === 'editor' && <EditorFoundation
+            project={activeProject}
+            projectDocument={documents.find((document) => document.id === activeProjectId) ?? null}
+            sessionSources={sessionSources}
+            selectedMediaKey={selectedMediaKey}
+            isReadingMedia={isReadingMedia}
+            onBack={() => navigate('home')}
+            onImportVideo={() => requestVideoImport()}
+            onRelinkVideo={(assetId) => requestVideoImport(assetId)}
+            onSelectMedia={setSelectedMediaKey}
+            onPlaybackError={() => notify('Browser playback failed. The file may use a codec this browser cannot decode.', 'error')}
+          />}
           {workspace === 'clipping' && <ClippingFoundation onCreate={() => setShowCreate(true)} />}
         </main>
       </div>
 
       <input ref={projectFileInputRef} hidden type="file" accept=".cwproject,application/json" aria-label="Choose a ClipWright project file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importProjectFile(file); }} />
+      <input ref={videoFileInputRef} hidden type="file" accept="video/*,.mp4,.m4v,.mov,.webm,.ogv,.avi" aria-label="Choose a local video file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importVideoFile(file); }} />
       {showCreate && <CreateProjectDialog onClose={() => setShowCreate(false)} onCreate={createNewProject} />}
       {showSettings && <SettingsDialog theme={theme} onTheme={setTheme} onClose={() => setShowSettings(false)} />}
       {showCommands && <CommandDialog inputRef={searchRef} onClose={() => setShowCommands(false)} actions={[
@@ -437,16 +582,131 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
   </div>;
 }
 
-function EditorFoundation({ project, projectDocument, onBack, onImportUnavailable }: { project: Project | null; projectDocument: ProjectDocument | null; onBack: () => void; onImportUnavailable: () => void }) {
+function EditorFoundation({
+  project,
+  projectDocument,
+  sessionSources,
+  selectedMediaKey,
+  isReadingMedia,
+  onBack,
+  onImportVideo,
+  onRelinkVideo,
+  onSelectMedia,
+  onPlaybackError,
+}: {
+  project: Project | null;
+  projectDocument: ProjectDocument | null;
+  sessionSources: Record<string, SessionMediaSource>;
+  selectedMediaKey: string | null;
+  isReadingMedia: boolean;
+  onBack: () => void;
+  onImportVideo: () => void;
+  onRelinkVideo: (assetId: string) => void;
+  onSelectMedia: (key: string) => void;
+  onPlaybackError: () => void;
+}) {
   const sequence = projectDocument?.sequences.find((item) => item.id === projectDocument.projectSettings.defaultSequenceId) ?? null;
   const ratio = sequence ? aspectRatioOf(sequence.width, sequence.height) : project?.aspectRatio ?? '16:9';
   const frameRate = sequence ? formatFrameRate(sequence.frameRate.numerator / sequence.frameRate.denominator) : formatFrameRate(project?.frameRate ?? 30);
+  const assets = projectDocument?.assets ?? [];
+  const playableAsset = assets.find((asset) => asset.kind === 'video' && mediaKey(projectDocument?.id ?? '', asset.id) === selectedMediaKey)
+    ?? assets.find((asset) => asset.kind === 'video')
+    ?? null;
+  const activeKey = playableAsset && projectDocument ? mediaKey(projectDocument.id, playableAsset.id) : null;
+  const source = activeKey ? sessionSources[activeKey] : undefined;
+  const stream = playableAsset?.streams.video;
+  const metadataDuration = stream ? stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator : 0;
   const savedClipCount = sequence?.tracks.reduce((total, track) => total + track.clips.length, 0) ?? 0;
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState(0.8);
+  const [playbackError, setPlaybackError] = useState(false);
+
+  useEffect(() => {
+    setCurrentTime(0);
+    setDuration(metadataDuration);
+    setIsPlaying(false);
+    setPlaybackError(false);
+    videoRef.current?.pause();
+  }, [source?.url, metadataDuration]);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.volume = volume;
+  }, [volume, source?.url]);
+
+  function seekBy(seconds: number) {
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.duration)) video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
+  }
+
+  function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play().catch(() => { setPlaybackError(true); onPlaybackError(); });
+    } else video.pause();
+  }
+
   return <section className="editor-foundation">
     <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project ? ratio : '—'}</span><span>{project ? frameRate : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
     <div className="editor-layout">
-      <aside className="editor-media-panel"><div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import media (not available yet)" onClick={onImportUnavailable}><Plus size={16} /></button></div><div className="media-empty"><div className="media-icon"><Film size={20} /></div><strong>{projectDocument?.assets.length ? `${projectDocument.assets.length} media reference${projectDocument.assets.length === 1 ? '' : 's'} in project` : 'No media imported'}</strong><span>{projectDocument?.assets.length ? 'Source paths are stored in the document, but their availability has not been checked.' : 'Media import and metadata inspection are not implemented in this foundation build.'}</span><button className="button button-secondary button-small" onClick={onImportUnavailable}><Plus size={14} />Import media</button></div><div className="panel-footnote"><HardDrive size={12} />Original files are never modified</div></aside>
-      <div className="editor-center"><div className="preview-stage"><div className="preview-frame"><div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/><Film size={35} strokeWidth={1.15} /><span>{projectDocument?.assets.length ? 'Media references loaded · preview decoding is not implemented' : 'Preview appears after media import becomes available'}</span><small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small></div></div><div className="preview-controls"><button className="transport-button" disabled title="No media loaded"><ArrowLeft size={15} /></button><button className="play-button" disabled aria-label="Play"><span /></button><button className="transport-button" disabled title="No media loaded"><ArrowRight size={15} /></button><span className="time-readout">00:00:00:00 <i>/</i> 00:00:00:00</span><span className="preview-quality">Balanced <ChevronDown size={12} /></span></div><div className="timeline-panel"><div className="timeline-heading"><div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div><div className="timeline-tools"><button disabled title="Split clip unavailable"><Keyboard size={14} /></button><button disabled title="Fit timeline unavailable"><LayoutPanelLeft size={14} /></button></div></div><div className="timeline-ruler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:40</span><span>00:50</span></div><div className="track-row"><span className="track-name">V1</span><div className="track-space"><div className="empty-track"><span>Add video to start editing</span><Plus size={14} /></div></div></div><div className="track-row audio-track"><span className="track-name">A1</span><div className="track-space"><div className="empty-audio"><span>Audio track</span></div></div></div><div className="timeline-note">{savedClipCount ? `This project document contains ${savedClipCount} clip entries; timeline rendering and editing are not implemented.` : 'Timeline editing, playback, and export are upcoming milestones.'}</div></div></div>
+      <aside className="editor-media-panel" aria-label="Project media">
+        <div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button></div>
+        {assets.length ? <div className="media-asset-list" aria-label="Media assets">
+          {assets.map((asset) => {
+            const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
+            const available = Boolean(sessionSources[key]);
+            const isVideo = asset.kind === 'video' && Boolean(asset.streams.video);
+            return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
+              <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && onSelectMedia(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
+                <Film size={15} /><span className="media-asset-copy"><strong>{asset.name}</strong><small>{isVideo ? (available ? 'Ready in this session' : 'Relink required') : `${asset.kind} preview not supported`}</small></span>
+              </button>
+              {isVideo && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
+            </div>;
+          })}
+          <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
+        </div> : <div className="media-empty">
+          <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose a local video to read browser-reported metadata and preview supported formats.</span><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button>
+        </div>}
+        {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
+        <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
+      </aside>
+      <div className="editor-center">
+        <div className="preview-stage"><div className="preview-frame">
+          {source ? <video
+            ref={videoRef}
+            className="preview-video"
+            src={source.url}
+            playsInline
+            preload="metadata"
+            aria-label={`${playableAsset?.name ?? source.name} source preview`}
+            onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+            onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onEnded={() => setIsPlaying(false)}
+            onError={() => { setPlaybackError(true); onPlaybackError(); }}
+          /> : <><Film size={35} strokeWidth={1.15} /><span>{playableAsset ? 'Relink this source to preview it in the current session' : assets.length ? 'No supported video source is available to preview' : 'Choose a video to start source preview'}</span></>}
+          {playbackError && <span className="preview-error" role="status">Browser playback failed for this source.</span>}
+          <div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/>
+          <small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small>
+        </div></div>
+        <div className="preview-controls" aria-label="Source preview controls">
+          <button className="transport-button" type="button" disabled={!source} title="Seek backward 5 seconds" aria-label="Seek backward 5 seconds" onClick={() => seekBy(-5)}><SkipBack size={15} /></button>
+          <button className="play-button" type="button" disabled={!source} aria-label={isPlaying ? 'Pause source preview' : 'Play source preview'} onClick={togglePlayback}>{isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+          <button className="transport-button" type="button" disabled={!source} title="Seek forward 5 seconds" aria-label="Seek forward 5 seconds" onClick={() => seekBy(5)}><SkipForward size={15} /></button>
+          <span className="time-readout">{formatPlaybackTime(currentTime)} <i>/</i> {formatPlaybackTime(duration)}</span>
+          <input className="preview-seek" aria-label="Seek source video" type="range" min="0" max={duration || 1} step="0.05" value={Math.min(currentTime, duration || 0)} onChange={(event) => { if (videoRef.current) videoRef.current.currentTime = Number(event.target.value); }} disabled={!source || !duration} />
+          <button className="volume-button" type="button" aria-label={volume > 0 ? 'Mute preview audio' : 'Unmute preview audio'} onClick={() => setVolume((value) => value > 0 ? 0 : 0.8)} disabled={!source}>{volume > 0 ? <Volume2 size={15} /> : <VolumeX size={15} />}</button>
+          <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
+          <span className="preview-quality">Browser preview</span>
+        </div>
+        <div className="timeline-panel"><div className="timeline-heading"><div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div><div className="timeline-tools"><button disabled title="Split clip unavailable"><Keyboard size={14} /></button><button disabled title="Fit timeline unavailable"><LayoutPanelLeft size={14} /></button></div></div><div className="timeline-ruler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:40</span><span>00:50</span></div><div className="track-row"><span className="track-name">V1</span><div className="track-space"><div className="empty-track"><span>Add video to start editing</span><Plus size={14} /></div></div></div><div className="track-row audio-track"><span className="track-name">A1</span><div className="track-space"><div className="empty-audio"><span>Audio track</span></div></div></div><div className="timeline-note">{savedClipCount ? `This project document contains ${savedClipCount} clip entries; timeline rendering and editing are not implemented.` : 'Source playback is separate from the timeline. Editing and export are not available yet.'}</div></div>
+        <p className="preview-disclaimer">Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.</p>
+      </div>
       <aside className="properties-panel"><div className="panel-title">Properties</div><div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a clip in the timeline to view its properties.</span></div><div className="properties-divider"/><div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><small>Settings are loaded from the validated project document.</small></div></aside>
     </div>
     <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>
@@ -454,7 +714,7 @@ function EditorFoundation({ project, projectDocument, onBack, onImportUnavailabl
 }
 
 function ClippingFoundation({ onCreate }: { onCreate: () => void }) {
-  return <section className="clipping-view"><div className="clipping-heading"><div><div className="eyebrow">AI-ASSISTED WORKFLOW</div><h1>Find the moments worth keeping.</h1><p>Turn long recordings into focused clips — with you in control of every cut.</p></div><div className="clipping-mark"><Sparkles size={23} /></div></div><div className="clipping-notice"><span className="notice-indicator" /><div><strong>Analysis is not available yet</strong><p>This build does not include a transcription model or highlight-analysis provider. Your media will not be uploaded or analyzed.</p></div><span className="planned-tag">FOUNDATION</span></div><div className="clipping-steps"><div className="step-card"><span className="step-number">01</span><div className="step-icon"><FolderOpen size={19} /></div><h3>Add your source</h3><p>Choose a local video and review its media details.</p><span className="step-state">Not available yet</span></div><div className="step-connector" /><div className="step-card"><span className="step-number">02</span><div className="step-icon"><Sparkles size={19} /></div><h3>Review moments</h3><p>Check transcript-backed suggestions and why they were selected.</p><span className="step-state">Provider required</span></div><div className="step-connector" /><div className="step-card"><span className="step-number">03</span><div className="step-icon"><Clapperboard size={19} /></div><h3>Edit & export</h3><p>Refine the cut in the editor before creating your final export.</p><span className="step-state">Upcoming</span></div></div><div className="clipping-footer"><div><span className="footer-label">DESIGNED FOR PRIVACY</span><strong>Local-first, by default</strong><span> Cloud processing will always require explicit consent.</span></div><button className="button button-secondary" onClick={onCreate}><Plus size={15} />Create a project</button></div></section>;
+  return <section className="clipping-view"><div className="clipping-heading"><div><div className="eyebrow">AI-ASSISTED WORKFLOW</div><h1>Find the moments worth keeping.</h1><p>Turn long recordings into focused clips — with you in control of every cut.</p></div><div className="clipping-mark"><Sparkles size={23} /></div></div><div className="clipping-notice"><span className="notice-indicator" /><div><strong>Analysis is not available yet</strong><p>This build does not include a transcription model or highlight-analysis provider. Your media will not be uploaded or analyzed.</p></div><span className="planned-tag">FOUNDATION</span></div><div className="clipping-steps"><div className="step-card"><span className="step-number">01</span><div className="step-icon"><FolderOpen size={19} /></div><h3>Preview your source</h3><p>Import a local video from the Editor for browser-based metadata and preview.</p><span className="step-state">Available in Editor</span></div><div className="step-connector" /><div className="step-card"><span className="step-number">02</span><div className="step-icon"><Sparkles size={19} /></div><h3>Review moments</h3><p>Check transcript-backed suggestions and why they were selected.</p><span className="step-state">Provider required</span></div><div className="step-connector" /><div className="step-card"><span className="step-number">03</span><div className="step-icon"><Clapperboard size={19} /></div><h3>Edit & export</h3><p>Refine the cut in the editor before creating your final export.</p><span className="step-state">Upcoming</span></div></div><div className="clipping-footer"><div><span className="footer-label">DESIGNED FOR PRIVACY</span><strong>Local-first, by default</strong><span> Cloud processing will always require explicit consent.</span></div><button className="button button-secondary" onClick={onCreate}><Plus size={15} />Create a project</button></div></section>;
 }
 
 function SettingsDialog({ theme, onTheme, onClose }: { theme: 'dark' | 'light'; onTheme: (value: 'dark' | 'light') => void; onClose: () => void }) {

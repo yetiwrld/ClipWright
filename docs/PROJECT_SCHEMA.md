@@ -1,6 +1,6 @@
 # ClipWright project document schema — v1
 
-Status: implemented as a validated TypeScript data contract; integrated with project creation, browser-local document storage, `.cwproject` downloads, and validated local-file open/import. Imported media paths are preserved but not checked/relinked. Timeline mutation, atomic filesystem writes, and crash recovery are not yet implemented.
+Status: implemented as a validated TypeScript data contract; integrated with project creation, browser-local document storage, `.cwproject` downloads/import, and session-only browser-picked video metadata/source preview. Imported project paths are not auto-resolved, but video references can be relinked via the file picker. Timeline mutation, atomic filesystem writes, and crash recovery are not yet implemented.
 
 ## Why two stores exist
 
@@ -12,7 +12,8 @@ The dashboard project entry (`projects.ts`) is a small index record used for nam
 
 - `schemaVersion` (currently 1), `appVersion`, stable project ID, and metadata timestamps.
 - `projectSettings.defaultSequenceId`.
-- `assets[]` with stable IDs, display name, source path, path kind, media kind, optional media-stream descriptors, optional size and fingerprint. Paths are references; media bytes are never embedded.
+- `assets[]` with stable IDs, display name, source path, path kind (`absolute`, `project-relative`, or `browser-session`), media kind, optional media-stream descriptors, optional size and fingerprint. Paths are references; media bytes and temporary browser URLs are never embedded.
+- Stream metadata can include `metadataSource: "browser" | "container"` so browser-reported observations are distinguishable from future container inspection.
 - `sequences[]` with dimensions, exact rational frame rate, audio sample rate, duration in integer frames, and ordered tracks.
 - `tracks[]` currently support video/audio kind, name, mute/lock flags, and clips.
 - Video clips use integer `timelineStartFrame` and `timelineDurationFrames`; audio clips use integer `timelineStartSample` and `timelineDurationSamples` plus an explicit sample rate. Source ranges use integer stream ticks, interpreted using that source stream’s rational `timeBase` (seconds per tick). Playback rate is rational.
@@ -24,6 +25,14 @@ Rationals use `{ "numerator": n, "denominator": d }` with positive safe integers
 `validateProjectDocument` checks required fields, supported schema version, safe integer timing, rational denominators, dimensions/rates, unique IDs, track/clip kind agreement, media references, stream presence, source boundaries, default-sequence references, and video clip bounds against sequence duration. `serializeProjectDocument` refuses invalid structures; `parseProjectDocument` reports malformed JSON or field-specific validation failures. Unknown future schema versions are rejected instead of being silently rewritten.
 
 The format currently represents only the editing foundation: media references, sequence settings, and basic video/audio clip placement. Effects, transitions, titles, captions, keyframes, colour/audio processing, project history, proxy state, and renderer compatibility metadata remain future schema additions, not implied capabilities.
+
+## Browser-picked video references
+
+The Editor can create a `browser-session` video asset from a user-selected `File`. The document stores the selected file's basename and browser-reported size, width, height, and duration. The observed duration is represented in rounded microsecond ticks (`timeBase: 1/1,000,000`) and tagged `metadataSource: "browser"`; no frame rate is inferred from this metadata. These are browser media-element values, not verified container timestamps or a frame-accurate probe.
+
+The actual `File` is referenced through a temporary `blob:` object URL kept only in app memory and revoked when replaced, deleted, or when the app is left. The URL and media bytes are never written to localStorage or a `.cwproject`. Ordinary browser file pickers do not expose a durable local path, so every session-only source must be relinked after reload. Existing absolute/project-relative paths imported from project files are not checked automatically; users can relink video assets by selecting the corresponding local file.
+
+Preview uses the browser's native `<video>` decoder and playback controls. Supported containers/codecs vary by browser and operating system; this is not transcoding, complete codec detection, or frame-accurate timeline playback. Audio-only and image previews are not supported by this increment.
 
 ## Migration
 

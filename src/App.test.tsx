@@ -28,7 +28,74 @@ describe('ClipWright foundation UI', () => {
     await waitFor(() => expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).toContain('"schemaVersion":1'));
     const savedDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
     expect(savedDocuments[0].sequences[0].tracks).toHaveLength(2);
-    expect(screen.getByText(/media import and metadata inspection are not implemented/i)).toBeTruthy();
+    expect(screen.getByText(/choose a local video to read browser-reported metadata/i)).toBeTruthy();
+  });
+
+  it('imports a local video for browser-session metadata and source preview only', async () => {
+    const firstRender = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
+    fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Local source test' } });
+    fireEvent.click(screen.getByRole('button', { name: /create project/i }));
+
+    const createObjectURL = vi.fn().mockReturnValueOnce('blob:clipwright-local-video').mockReturnValueOnce('blob:clipwright-relinked-video');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(function () {});
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(function (this: HTMLMediaElement) {
+      Object.defineProperties(this, {
+        duration: { configurable: true, value: 8.125 },
+        videoWidth: { configurable: true, value: 1280 },
+        videoHeight: { configurable: true, value: 720 },
+      });
+      window.setTimeout(() => this.dispatchEvent(new Event('loadedmetadata')), 0);
+    });
+    const file = new File(['local test bytes'], 'sample.mp4', { type: 'video/mp4' });
+    fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [file] } });
+
+    expect(await screen.findByText(/Metadata read · sample\.mp4 · 1280 × 720 · 8\.13 s/)).toBeTruthy();
+    const preview = screen.getByLabelText('sample.mp4 source preview') as HTMLVideoElement;
+    expect(preview.src).toBe('blob:clipwright-local-video');
+    expect(screen.getByRole('button', { name: 'Play source preview' }).hasAttribute('disabled')).toBe(false);
+    await waitFor(() => expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).toContain('browser-session'));
+    const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(saved[0].assets[0]).toMatchObject({
+      name: 'sample.mp4',
+      sourcePath: 'sample.mp4',
+      pathKind: 'browser-session',
+      kind: 'video',
+      fileSizeBytes: file.size,
+      streams: { video: { timeBase: { numerator: 1, denominator: 1_000_000 }, durationTicks: 8_125_000, width: 1280, height: 720, metadataSource: 'browser' } },
+    });
+    expect(JSON.stringify(saved)).not.toContain('blob:clipwright-local-video');
+    expect(createObjectURL).toHaveBeenCalledWith(file);
+
+    firstRender.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:clipwright-local-video');
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Local source test' }));
+    expect(await screen.findByText('Relink required')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Relink' }));
+    const relinkedFile = new File(['same source'], 'sample-relinked.mp4', { type: 'video/mp4' });
+    fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [relinkedFile] } });
+    expect(await screen.findByText(/Metadata read · sample-relinked\.mp4 · 1280 × 720 · 8\.13 s/)).toBeTruthy();
+    const relinkedPreview = screen.getByLabelText('sample-relinked.mp4 source preview') as HTMLVideoElement;
+    expect(relinkedPreview.src).toBe('blob:clipwright-relinked-video');
+    const relinkedDocument = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(relinkedDocument[0].assets).toHaveLength(1);
+    expect(relinkedDocument[0].assets[0].sourcePath).toBe('sample-relinked.mp4');
+  });
+
+  it('rejects audio-only picks without creating a project media reference', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
+    fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Audio negative case' } });
+    fireEvent.click(screen.getByRole('button', { name: /create project/i }));
+    const audio = new File(['audio bytes'], 'voice.wav', { type: 'audio/wav' });
+    fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [audio] } });
+
+    expect(await screen.findByText(/audio-only ingestion is not supported yet/i)).toBeTruthy();
+    const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(saved[0].assets).toEqual([]);
   });
 
   it('downloads the validated project document without embedding media', async () => {

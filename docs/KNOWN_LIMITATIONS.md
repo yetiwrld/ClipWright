@@ -1,12 +1,15 @@
 # Known limitations — foundation build 0.1.0
 
-This is the initial application foundation, not a usable video editor yet.
+This is an early browser-based editing foundation, not a complete video editor.
 
 - Runs as a web renderer/dev server. There is no Electron main process, native Windows app, installer, or portable build.
-- Dashboard entries, v1 project documents, and theme settings use browser localStorage. `.cwproject` files can be opened/imported and downloaded, but the browser does not offer managed project-folder storage or atomic save. Downloads are manual snapshots. Source media is referenced, not bundled; imported paths are not checked or relinked. Autosave, checkpoints, and crash recovery are not implemented. Browser storage is not a reliable sole copy.
-- No media import, metadata inspection, playback, preview decoding, sequence/timeline model, clip editing, undo/redo, audio, effects, captions, AI, rendering, or export.
-- Editor and AI Clipping workspaces are navigable shells that explicitly describe unavailable capabilities; no fake processing is performed.
+- Dashboard entries, v1 project documents, and theme settings use browser localStorage. `.cwproject` files can be opened/imported and downloaded, but the browser does not offer managed project-folder storage or atomic save. Downloads are manual snapshots. Browser storage is interim and may be cleared; do not use it as the only copy of important work.
+- Video files can be selected locally for browser-reported width, height, and duration metadata and an in-session source preview. The media bytes remain outside project storage and are not uploaded. An object URL exists only in memory for the current app session; after a reload, the selected video must be relinked. Project files store only a filename-only `browser-session` reference and metadata, not a durable path, media bytes, or blob URL.
+- Source preview uses the browser's `<video>` element. Playback depends on the exact container/codec support of the current browser and operating system; selection or metadata inspection does not guarantee decodability. No transcoding, complete codec probe, or codec-independent playback is provided.
+- Browser duration is rounded to a microsecond-based project timebase and tagged as browser-reported metadata. Browser-reported values are not container-verified; frame rate is not inferred. Preview scrubbing uses browser media-element seeking and is not frame-accurate.
+- Imported `.cwproject` media paths are not automatically verified or resolved. Video assets can be relinked manually; direct picker-based ingestion/preview for audio-only files and images is not supported in this increment.
+- Timeline mutation, timeline playback, clip editing, undo/redo, effects, captions, audio processing, AI analysis, rendering, and export are not implemented. The source preview is separate from the timeline.
 - No FFmpeg binary/library, AI model, cloud provider, database, plugin system, telemetry, or credential store is included.
 - The generated project card background is visual decoration only, not a real media thumbnail.
 - The icon asset was supplied by the requester, but its redistribution rights are unverified.
-- No Windows hardware benchmark, codec compatibility test, end-to-end media test, or installer test has been run.
+- Automated tests cover metadata handling with mocked browser media events; no real codec/media fixture or Windows hardware compatibility test has been run. No installer test has been run.

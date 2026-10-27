@@ -11,13 +11,14 @@ export type StreamInfo = {
   width?: number;
   height?: number;
   sampleRate?: number;
+  metadataSource?: 'browser' | 'container';
   channels?: number;
 };
 export type MediaAsset = {
   id: string;
   name: string;
   sourcePath: string;
-  pathKind: 'absolute' | 'project-relative';
+  pathKind: 'absolute' | 'project-relative' | 'browser-session';
   kind: 'video' | 'audio' | 'image';
   streams: { video?: StreamInfo; audio?: StreamInfo };
   fileSizeBytes?: number;
@@ -147,7 +148,8 @@ function validateStream(value: unknown, path: string, errors: string[]): value i
   if (value.width !== undefined && !isDimension(value.width)) errors.push(`${path}.width must be between 16 and 16384.`);
   if (value.height !== undefined && !isDimension(value.height)) errors.push(`${path}.height must be between 16 and 16384.`);
   if (value.sampleRate !== undefined && !isSampleRate(value.sampleRate)) errors.push(`${path}.sampleRate must be between 8000 and 384000 Hz.`);
-  if (value.channels !== undefined && !isInteger(value.channels, 1)) errors.push(`${path}.channels must be a positive integer.`);
+  if (value.channels !== undefined && (!isInteger(value.channels, 1) || value.channels > 128)) errors.push(`${path}.channels must be between 1 and 128.`);
+  if (value.metadataSource !== undefined && !['browser', 'container'].includes(String(value.metadataSource))) errors.push(`${path}.metadataSource is unsupported.`);
   return true;
 }
 
@@ -184,7 +186,7 @@ export function validateProjectDocument(value: unknown): ValidationResult {
     }
     if (!isString(asset.name)) errors.push(`${path}.name must be a non-empty string.`);
     if (!isString(asset.sourcePath) || asset.sourcePath.includes('\0')) errors.push(`${path}.sourcePath must be a non-empty local path without NUL bytes.`);
-    if (!['absolute', 'project-relative'].includes(String(asset.pathKind))) errors.push(`${path}.pathKind must be absolute or project-relative.`);
+    if (!['absolute', 'project-relative', 'browser-session'].includes(String(asset.pathKind))) errors.push(`${path}.pathKind is unsupported.`);
     if (isString(asset.sourcePath)) {
       const driveAbsolute = /^[A-Za-z]:[\\/]/.test(asset.sourcePath);
       const isAbsolute = driveAbsolute || asset.sourcePath.startsWith('/') || asset.sourcePath.startsWith('\\\\');
@@ -192,6 +194,7 @@ export function validateProjectDocument(value: unknown): ValidationResult {
       if (hasUriScheme) errors.push(`${path}.sourcePath must be a local path, not a URI.`);
       if (asset.pathKind === 'absolute' && !isAbsolute) errors.push(`${path}.sourcePath must be absolute when pathKind is absolute.`);
       if (asset.pathKind === 'project-relative' && isAbsolute) errors.push(`${path}.sourcePath must be relative when pathKind is project-relative.`);
+      if (asset.pathKind === 'browser-session' && (isAbsolute || asset.sourcePath.includes('/') || asset.sourcePath.includes('\\'))) errors.push(`${path}.sourcePath must be a filename for a browser-session reference.`);
     }
     if (!['video', 'audio', 'image'].includes(String(asset.kind))) errors.push(`${path}.kind is unsupported.`);
     if (!isObject(asset.streams)) { errors.push(`${path}.streams must be an object.`); return; }
