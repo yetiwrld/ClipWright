@@ -30,11 +30,25 @@ describe('ClipWright foundation UI', () => {
     expect(savedDocuments[0].sequences[0].tracks).toHaveLength(2);
     expect(screen.getByText(/choose a local video to read browser-reported metadata/i)).toBeTruthy();
     expect([...container.querySelectorAll('.editor-layout > *')].map((element) => element.className)).toEqual([
-      'timeline-panel',
       'editor-media-panel',
       'editor-center',
       'properties-panel',
     ]);
+    expect([...container.querySelectorAll('.editor-center > *')].map((element) => element.className)).toEqual([
+      'preview-stage',
+      'preview-controls',
+      'timeline-resize-handle',
+      'timeline-panel',
+    ]);
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize timeline height' }), { key: 'ArrowUp' });
+    expect(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow')).toBe('256');
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe('256');
+    fireEvent.change(screen.getByRole('slider', { name: 'Timeline zoom level' }), { target: { value: '2' } });
+    expect(screen.getByText('200%')).toBeTruthy();
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('2');
+    fireEvent.click(screen.getByRole('button', { name: 'Fit project in timeline' }));
+    expect(screen.getByText('100%')).toBeTruthy();
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('1');
   });
 
   it('imports, previews, relinks, and edits a browser-session video on the timeline', async () => {

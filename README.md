@@ -32,6 +32,7 @@ npm run build
 - Keep picked media available only for the current page session using a revocable object URL. The project document stores a filename-only `browser-session` reference and browser-reported metadata, never the bytes or temporary URL; relinking is required after reload.
 - `.cwproject` path references are not auto-resolved or verified. Imported video references can be relinked through the file picker.
 - Append the selected in-session video source to an unlocked video track, reposition clips by integer sequence-frame index without overlap, trim source in/out points in stream ticks, remove clips, and persist the resulting project document. Source-duration-to-sequence mapping is rounded from browser-reported duration; undo/redo history is session-only and source preview remains separate from the timeline.
+- Keep the timeline below source-preview controls with a resizable lower pane, persistent workspace height/zoom preferences, fit-project and zoom controls, frame-based ruler mapping, and horizontally sticky track headers.
 - Migrate the foundation’s earlier project-list records into empty v1 documents; preserve unreadable data until the user confirms recovery.
 - Open, rename, duplicate, favourite, archive/restore, search, and delete project entries.
 - Deletion is confirmed and removes only local project entries/documents; it never deletes media.

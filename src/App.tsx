@@ -3,8 +3,8 @@ import {
   Archive, ArrowLeft, ArrowRight, Check, ChevronDown, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
-  Grid2X2, HardDrive, Heart, Home, Keyboard, LayoutPanelLeft, ListFilter,
-  MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload,
+  Grid2X2, HardDrive, Heart, Home, Keyboard, ListFilter, Maximize2,
+  MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut,
   X, type LucideIcon,
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
@@ -41,6 +41,37 @@ function aspectRatioOf(width: number, height: number) {
 type SessionMediaSource = { url: string; name: string };
 type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
+const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
+const TIMELINE_ZOOM_KEY = 'clipwright.workspace.timeline-zoom';
+const TIMELINE_MIN_HEIGHT = 180;
+
+function readTimelineHeight() {
+  try {
+    const value = Number(window.localStorage.getItem(TIMELINE_HEIGHT_KEY));
+    return Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT ? value : 240;
+  } catch { return 240; }
+}
+
+function storeTimelineHeight(value: number) {
+  try { window.localStorage.setItem(TIMELINE_HEIGHT_KEY, String(value)); }
+  catch { /* The workspace remains usable when preferences cannot be persisted. */ }
+}
+
+function readTimelineZoom() {
+  try {
+    const value = Number(window.localStorage.getItem(TIMELINE_ZOOM_KEY));
+    return Number.isFinite(value) && value >= 0.25 && value <= 4 ? value : 1;
+  } catch { return 1; }
+}
+
+function storeTimelineZoom(value: number) {
+  try { window.localStorage.setItem(TIMELINE_ZOOM_KEY, String(value)); }
+  catch { /* The workspace remains usable when preferences cannot be persisted. */ }
+}
+
+function niceRulerIntervalSeconds(target: number) {
+  return [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600].find((value) => value >= target) ?? Math.ceil(target / 3600) * 3600;
+}
 
 function formatPlaybackTime(value: number) {
   const milliseconds = Math.max(0, Math.floor((Number.isFinite(value) ? value : 0) * 1000));
@@ -56,7 +87,8 @@ function formatRulerTime(frame: number, frameRate: { numerator: number; denomina
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor(totalSeconds % 3600 / 60);
   const seconds = totalSeconds % 60;
-  return hours ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  const frames = frame - Math.floor(totalSeconds * frameRate.numerator / frameRate.denominator);
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
 }
 
 function formatSourceSeconds(ticks: number, timeBase: { numerator: number; denominator: number }) {
@@ -756,17 +788,29 @@ function EditorFoundation({
   const selectedClipTrack = selectedClip ? videoTracks.find((track) => track.clips.some((clip) => clip.id === selectedClip.id)) : null;
   const selectedClipAsset = selectedClip ? assets.find((asset) => asset.id === selectedClip.assetId) : null;
   const frameRateValue = sequence ? sequence.frameRate.numerator / sequence.frameRate.denominator : project?.frameRate ?? 30;
+  const editorCenterRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
-  const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
+  const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
+  const timelineHeightRef = useRef(240);
+  const [editorCenterSize, setEditorCenterSize] = useState({ width: 0, height: 0 });
+  const [timelineHeight, setTimelineHeight] = useState(readTimelineHeight);
+  const [timelineZoom, setTimelineZoom] = useState(readTimelineZoom);
+  timelineHeightRef.current = timelineHeight;
   const sequenceDurationFrames = sequence ? Math.max(sequence.durationFrames, sequenceDurationInFrames(sequence)) : 0;
   const timelineVisibleFrames = Math.max(sequenceDurationFrames, Math.ceil(frameRateValue * 20));
-  const timelineWidth = Math.max(540, Math.min(120_000, timelineVisibleFrames * 1.5), timelineViewportWidth);
-  const timelineContentWidth = timelineWidth - 32;
-  const timelinePixelsPerFrame = timelineContentWidth / timelineVisibleFrames;
+  const timelineHeaderWidth = 150;
+  const timelineViewportWidth = Math.max(350, editorCenterSize.width ? editorCenterSize.width - 26 : 574);
+  const timelineAvailableWidth = Math.max(200, timelineViewportWidth - timelineHeaderWidth);
+  const timelinePixelsPerFrame = Math.max(0.001, timelineAvailableWidth / timelineVisibleFrames * timelineZoom);
+  const timelineCanvasFrames = Math.max(timelineVisibleFrames, Math.ceil(timelineAvailableWidth / timelinePixelsPerFrame));
+  const timelineContentWidth = Math.min(119_850, Math.max(200, Math.ceil(timelineCanvasFrames * timelinePixelsPerFrame)));
+  const timelineWidth = timelineHeaderWidth + timelineContentWidth;
   const audioClipCount = audioTracks.reduce((total, track) => total + track.clips.filter((clip) => clip.kind === 'audio').length, 0);
-  const tenSecondTick = Math.max(1, Math.round(frameRateValue * 10));
-  const tickInterval = tenSecondTick * Math.max(1, Math.ceil(timelineVisibleFrames / tenSecondTick / 80));
-  const timelineTicks = Array.from({ length: Math.floor(timelineVisibleFrames / tickInterval) + 1 }, (_, index) => index * tickInterval);
+  const tickSeconds = niceRulerIntervalSeconds(80 / Math.max(0.001, timelinePixelsPerFrame * frameRateValue));
+  const tickInterval = Math.max(1, Math.round(frameRateValue * tickSeconds));
+  const timelineTicks = Array.from({ length: Math.min(2_000, Math.floor(timelineCanvasFrames / tickInterval) + 1) }, (_, index) => index * tickInterval);
+  const timelineMaxHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(720, Math.floor((editorCenterSize.height || 600) * 0.7), (editorCenterSize.height || 600) - 336));
+  const effectiveTimelineHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineHeight, timelineMaxHeight));
   const [startFrameDraft, setStartFrameDraft] = useState('0');
   const [sourceInDraft, setSourceInDraft] = useState('0');
   const [sourceOutDraft, setSourceOutDraft] = useState('0');
@@ -778,14 +822,14 @@ function EditorFoundation({
   const [playbackError, setPlaybackError] = useState(false);
 
   useEffect(() => {
-    const element = timelineScrollRef.current;
+    const element = editorCenterRef.current;
     if (!element || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(([entry]) => {
-      if (entry) setTimelineViewportWidth(Math.ceil(entry.contentRect.width));
+      if (entry) setEditorCenterSize({ width: Math.ceil(entry.contentRect.width), height: Math.ceil(entry.contentRect.height) });
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [sequence?.id]);
+  }, []);
 
   useEffect(() => {
     setStartFrameDraft(String(selectedClip?.timelineStartFrame ?? 0));
@@ -852,55 +896,64 @@ function EditorFoundation({
     }
   }
 
+  function setWorkspaceTimelineHeight(nextHeight: number) {
+    const next = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineMaxHeight, Math.round(nextHeight)));
+    timelineHeightRef.current = next;
+    setTimelineHeight(next);
+    storeTimelineHeight(next);
+  }
+
+  function beginTimelineResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizeStartRef.current = { y: event.clientY, height: effectiveTimelineHeight };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function moveTimelineResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (!resizeStartRef.current) return;
+    const next = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineMaxHeight, resizeStartRef.current.height + resizeStartRef.current.y - event.clientY));
+    timelineHeightRef.current = next;
+    setTimelineHeight(next);
+  }
+
+  function endTimelineResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (!resizeStartRef.current) return;
+    resizeStartRef.current = null;
+    storeTimelineHeight(timelineHeightRef.current);
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function handleTimelineResizeKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowUp' ? 16 : event.key === 'ArrowDown' ? -16 : 0;
+      setWorkspaceTimelineHeight(event.key === 'Home' ? TIMELINE_MIN_HEIGHT : event.key === 'End' ? timelineMaxHeight : effectiveTimelineHeight + delta);
+    }
+  }
+
+  function zoomTimeline(next: number, preserveAnchor = true) {
+    const zoom = Math.max(0.25, Math.min(4, Number(next.toFixed(2))));
+    const scroller = timelineScrollRef.current;
+    const anchorFrame = scroller
+      ? Math.max(0, (scroller.scrollLeft + scroller.clientWidth / 2 - timelineHeaderWidth) / timelinePixelsPerFrame)
+      : 0;
+    setTimelineZoom(zoom);
+    storeTimelineZoom(zoom);
+    if (scroller && preserveAnchor) window.requestAnimationFrame(() => {
+      const nextPixelsPerFrame = timelineAvailableWidth / timelineVisibleFrames * zoom;
+      scroller.scrollLeft = Math.max(0, anchorFrame * nextPixelsPerFrame + timelineHeaderWidth - scroller.clientWidth / 2);
+    });
+  }
+
+  function fitTimelineToProject() {
+    zoomTimeline(1, false);
+    if (timelineScrollRef.current) timelineScrollRef.current.scrollLeft = 0;
+  }
+
   return <section className="editor-foundation">
     <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project ? ratio : '—'}</span><span>{project ? frameRate : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
     <div className="editor-layout">
-      <div className="timeline-panel">
-        <div className="timeline-heading">
-          <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
-          <div className="timeline-tools">
-            <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
-            <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
-            <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
-            <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
-            <button type="button" disabled title="Timeline zoom is not available yet"><LayoutPanelLeft size={14} /></button>
-          </div>
-        </div>
-        {sequence ? <div className="timeline-scroll" ref={timelineScrollRef} role="region" aria-label="Timeline tracks">
-          <div className="timeline-canvas" style={{ width: timelineWidth }}>
-            <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
-              {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
-            </div>
-            {videoTracks.map((track, trackIndex) => {
-              const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
-              return <div className="track-row" key={track.id}>
-                <span className="track-name" title={track.name}>V{trackIndex + 1}</span>
-                <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
-                  {clips.length ? clips.map((clip) => {
-                    const asset = assets.find((item) => item.id === clip.assetId);
-                    return <button
-                      className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
-                      type="button"
-                      key={clip.id}
-                      style={{ left: clip.timelineStartFrame * timelinePixelsPerFrame, width: Math.max(3, clip.timelineDurationFrames * timelinePixelsPerFrame) }}
-                      aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
-                      aria-pressed={selectedTimelineClipId === clip.id}
-                      title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
-                      onClick={() => setSelectedTimelineClipId(clip.id)}
-                    >{asset?.name ?? 'Video clip'}</button>;
-                  }) : <div className="empty-track"><span>Select a source above, then choose “Add selected source”</span></div>}
-                </div>
-              </div>;
-            })}
-            {audioTracks.map((track, trackIndex) => <div className="track-row audio-track" key={track.id}>
-              <span className="track-name" title={track.name}>A{trackIndex + 1}</span>
-              <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}><div className="empty-audio"><span>Audio lane editing unavailable</span></div></div>
-            </div>)}
-          </div>
-        </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
-        <div className="timeline-note">Clip placement uses integer frames; source trims use stream ticks. Undo/redo history is session-only. Timeline playback and export are not included.</div>
-        {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
-      </div>
       <aside className="editor-media-panel" aria-label="Project media">
         <div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button></div>
         {assets.length ? <div className="media-asset-list" aria-label="Media assets">
@@ -922,7 +975,7 @@ function EditorFoundation({
         {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
         <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
       </aside>
-      <div className="editor-center">
+      <div className="editor-center" ref={editorCenterRef}>
         <div className="preview-stage"><div className="preview-frame">
           {source ? <video
             ref={videoRef}
@@ -951,9 +1004,76 @@ function EditorFoundation({
           <input className="preview-seek" aria-label="Seek source video" type="range" min="0" max={duration || 1} step="0.05" value={Math.min(currentTime, duration || 0)} onChange={(event) => { if (videoRef.current) videoRef.current.currentTime = Number(event.target.value); }} disabled={!source || !duration} />
           <button className="volume-button" type="button" aria-label={volume > 0 ? 'Mute preview audio' : 'Unmute preview audio'} onClick={() => setVolume((value) => value > 0 ? 0 : 0.8)} disabled={!source}>{volume > 0 ? <Volume2 size={15} /> : <VolumeX size={15} />}</button>
           <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
-          <span className="preview-quality">Browser preview</span>
+          <span className="preview-quality" title="Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.">Browser preview</span>
         </div>
-        <p className="preview-disclaimer">Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.</p>
+        <div
+          className="timeline-resize-handle"
+          role="separator"
+          aria-label="Resize timeline height"
+          aria-orientation="horizontal"
+          aria-valuemin={TIMELINE_MIN_HEIGHT}
+          aria-valuemax={timelineMaxHeight}
+          aria-valuenow={effectiveTimelineHeight}
+          aria-valuetext={`${effectiveTimelineHeight} pixels`}
+          tabIndex={0}
+          onPointerDown={beginTimelineResize}
+          onPointerMove={moveTimelineResize}
+          onPointerUp={endTimelineResize}
+          onPointerCancel={endTimelineResize}
+          onKeyDown={handleTimelineResizeKey}
+        ><span /></div>
+        <div className="timeline-panel" style={{ height: effectiveTimelineHeight }}>
+          <div className="timeline-heading">
+            <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
+            <div className="timeline-tools">
+              <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
+              <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
+              <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
+              <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
+              <div className="timeline-zoom" role="group" aria-label="Timeline zoom controls">
+                <button type="button" aria-label="Zoom timeline out" title="Zoom timeline out" disabled={timelineZoom <= 0.25} onClick={() => zoomTimeline(timelineZoom / 1.25)}><ZoomOut size={14} /></button>
+                <input aria-label="Timeline zoom level" type="range" min="0.25" max="4" step="0.05" value={timelineZoom} onChange={(event) => zoomTimeline(Number(event.target.value))} />
+                <button type="button" aria-label="Zoom timeline in" title="Zoom timeline in" disabled={timelineZoom >= 4} onClick={() => zoomTimeline(timelineZoom * 1.25)}><ZoomIn size={14} /></button>
+                <button type="button" aria-label="Fit project in timeline" title="Fit project in timeline" onClick={fitTimelineToProject}><Maximize2 size={14} /></button>
+                <output aria-live="polite">{Math.round(timelineZoom * 100)}%</output>
+              </div>
+            </div>
+          </div>
+          {sequence ? <div className="timeline-scroll" ref={timelineScrollRef} role="region" aria-label="Timeline tracks">
+            <div className="timeline-canvas" style={{ width: timelineWidth }}>
+              <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
+                {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
+              </div>
+              {videoTracks.map((track, trackIndex) => {
+                const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
+                return <div className="track-row" key={track.id}>
+                  <span className="track-name" title={track.name}><b>V{trackIndex + 1}</b><span>{track.name}</span></span>
+                  <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
+                    {clips.length ? clips.map((clip) => {
+                      const asset = assets.find((item) => item.id === clip.assetId);
+                      return <button
+                        className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
+                        type="button"
+                        key={clip.id}
+                        style={{ left: clip.timelineStartFrame * timelinePixelsPerFrame, width: Math.max(4, clip.timelineDurationFrames * timelinePixelsPerFrame) }}
+                        aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
+                        aria-pressed={selectedTimelineClipId === clip.id}
+                        title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
+                        onClick={() => setSelectedTimelineClipId(clip.id)}
+                      >{asset?.name ?? 'Video clip'}</button>;
+                    }) : <div className="empty-track"><span>Select a source in Project media, then choose “Add selected source”</span></div>}
+                  </div>
+                </div>;
+              })}
+              {audioTracks.map((track, trackIndex) => <div className="track-row audio-track" key={track.id}>
+                <span className="track-name" title={track.name}><b>A{trackIndex + 1}</b><span>{track.name}</span></span>
+                <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}><div className="empty-audio"><span>Audio lane editing unavailable</span></div></div>
+              </div>)}
+            </div>
+          </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
+          <div className="timeline-note">Clip placement uses integer frames; source trims use stream ticks. Undo/redo history is session-only. Timeline playback and export are not included.</div>
+          {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
+        </div>
       </div>
       <aside className="properties-panel">
         <div className="panel-title">Properties</div>
