@@ -31,11 +31,14 @@ describe('ClipWright foundation UI', () => {
     expect(savedDocuments[0].sequences[0].tracks).toHaveLength(2);
     expect(screen.getByText(/choose a local video to read browser-reported metadata/i)).toBeTruthy();
     expect([...container.querySelectorAll('.editor-layout > *')].map((element) => element.className)).toEqual([
+      'editor-main-row',
+      'timeline-resize-handle',
+      'timeline-panel',
+    ]);
+    expect([...container.querySelectorAll('.editor-main-row > *')].map((element) => element.className)).toEqual([
       'editor-media-panel',
       'editor-center',
       'properties-panel',
-      'timeline-resize-handle',
-      'timeline-panel',
     ]);
     expect([...container.querySelectorAll('.editor-center > *')].map((element) => element.className)).toEqual([
       'preview-stage',
@@ -68,6 +71,40 @@ describe('ClipWright foundation UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fit project in timeline' }));
     expect(screen.getByText('100%')).toBeTruthy();
     expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('1');
+  });
+
+  it('shows preserved audio clips as dimmed, non-editable items with their full-name tooltip', async () => {
+    const project = createProject('Audio timeline fixture', '16:9', 30, new Date('2025-01-01T00:00:00.000Z'));
+    const document = createProjectDocument(project, '0.1.0', (entity) => `${entity}-fixture-id`);
+    document.assets.push({
+      id: 'audio-asset-fixture-id',
+      name: 'Long ambient soundscape.wav',
+      sourcePath: 'Long ambient soundscape.wav',
+      pathKind: 'project-relative',
+      kind: 'audio',
+      streams: { audio: { timeBase: { numerator: 1, denominator: 48000 }, durationTicks: 480000, sampleRate: 48000, channels: 2 } },
+    });
+    document.sequences[0].durationFrames = 120;
+    document.sequences[0].tracks[1].clips.push({
+      id: 'audio-clip-fixture-id',
+      assetId: 'audio-asset-fixture-id',
+      kind: 'audio',
+      sourceInTick: 0,
+      sourceOutTick: 480000,
+      timelineStartSample: 48000,
+      timelineDurationSamples: 48000,
+      sampleRate: 48000,
+      playbackRate: { numerator: 1, denominator: 1 },
+    });
+    writeProjects(window.localStorage, [project]);
+    writeProjectDocuments(window.localStorage, [document]);
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: `Open ${project.name}` }));
+    const audioClip = await screen.findByRole('img', { name: 'Long ambient soundscape.wav; audio editing unavailable' });
+    expect(audioClip.getAttribute('title')).toBe('Long ambient soundscape.wav');
+    expect(audioClip.classList.contains('timeline-audio-clip')).toBe(true);
+    expect(container.querySelector('.empty-audio')).toBeNull();
   });
 
   it('imports, previews, relinks, and edits a browser-session video on the timeline', async () => {
@@ -113,6 +150,7 @@ describe('ClipWright foundation UI', () => {
     const { container } = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Open Local source test' }));
     expect(await screen.findByText('Relink required')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Relink video' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Relink' }));
     const relinkedFile = new File(['same source'], 'sample-relinked.mp4', { type: 'video/mp4' });
     fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [relinkedFile] } });

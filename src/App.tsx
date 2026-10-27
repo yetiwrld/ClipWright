@@ -10,7 +10,7 @@ import {
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
-import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, VideoClip } from './lib/projectDocument';
+import type { AudioClip, MediaAsset, ProjectDocument, Sequence, StreamInfo, VideoClip } from './lib/projectDocument';
 import { probeBrowserVideo } from './lib/browserMedia';
 import { appendVideoClip, moveVideoClip, removeVideoClip, sequenceDurationInFrames, trimVideoClip } from './lib/timelineOperations';
 
@@ -793,6 +793,7 @@ function EditorFoundation({
   const metadataDuration = stream ? stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator : 0;
   const videoTracks = sequence?.tracks.filter((track) => track.kind === 'video') ?? [];
   const audioTracks = sequence?.tracks.filter((track) => track.kind === 'audio') ?? [];
+  const timelineTrackRowTemplate = `repeat(${Math.max(1, videoTracks.length + audioTracks.length)}, minmax(64px, 1fr))`;
   const videoClips = videoTracks.flatMap((track) => track.clips.filter((clip): clip is VideoClip => clip.kind === 'video'));
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
   const [timelinePlayheadFrame, setTimelinePlayheadFrame] = useState(0);
@@ -1163,181 +1164,196 @@ function EditorFoundation({
   return <section className="editor-foundation">
     <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project ? ratio : '—'}</span><span>{project ? frameRate : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
     <div className="editor-layout" ref={editorLayoutRef}>
-      <aside className="editor-media-panel" aria-label="Project media">
-        <div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button></div>
-        {assets.length ? <div className="media-asset-list" aria-label="Media assets">
-          {assets.map((asset) => {
-            const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
-            const available = Boolean(sessionSources[key]);
-            const isVideo = asset.kind === 'video' && Boolean(asset.streams.video);
-            return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
-              <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && selectMediaSource(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
-                <Film size={15} /><span className="media-asset-copy"><strong>{asset.name}</strong><small>{isVideo ? (available ? 'Ready in this session' : 'Relink required') : `${asset.kind} preview not supported`}</small></span>
-              </button>
-              {isVideo && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
-            </div>;
-          })}
-          <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
-        </div> : <div className="media-empty">
-          <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose a local video to read browser-reported metadata and preview supported formats.</span><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button>
-        </div>}
-        {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
-        <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
-      </aside>
-      <div className="editor-center">
-        <div className="preview-stage"><div className="preview-frame">
-          {source ? <video
-            ref={videoRef}
-            className="preview-video"
-            src={source.url}
-            playsInline
-            preload="metadata"
-            aria-label={`${playableAsset?.name ?? source.name} source preview`}
-            onLoadedMetadata={handlePreviewLoadedMetadata}
-            onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
-            onTimeUpdate={handlePreviewTimeUpdate}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-            onEnded={() => {
-              setIsPlaying(false);
-              if (timelineSyncClip) setTimelinePlayheadFrame(timelineSyncClip.timelineStartFrame + timelineSyncClip.timelineDurationFrames);
-            }}
-            onError={() => { setPlaybackError(true); onPlaybackError(); }}
-          /> : <><Film size={35} strokeWidth={1.15} /><span>{playableAsset ? 'Relink this source to preview it in the current session' : assets.length ? 'No supported video source is available to preview' : 'Choose a video to start source preview'}</span></>}
-          {playbackError && <span className="preview-error" role="status">Browser playback failed for this source.</span>}
-          <div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/>
-          <small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small>
-        </div></div>
-        <div className="preview-controls" aria-label={timelineSyncClip ? 'Timeline clip preview controls' : 'Source preview controls'}>
-          <button className="transport-button" type="button" disabled={!source} title="Seek backward 5 seconds" aria-label="Seek backward 5 seconds" onClick={() => seekBy(-5)}><SkipBack size={15} /></button>
-          <button className="play-button" type="button" disabled={!source} aria-label={isPlaying ? (timelineSyncClip ? 'Pause timeline clip preview' : 'Pause source preview') : (timelineSyncClip ? 'Play timeline clip preview' : 'Play source preview')} onClick={togglePlayback}>{isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
-          <button className="transport-button" type="button" disabled={!source} title="Seek forward 5 seconds" aria-label="Seek forward 5 seconds" onClick={() => seekBy(5)}><SkipForward size={15} /></button>
-          <span className="time-readout">{formatPlaybackTime(currentTime)} <i>/</i> {formatPlaybackTime(duration)}</span>
-          <input className="preview-seek" aria-label={timelineSyncClip ? 'Seek timeline clip preview' : 'Seek source video'} type="range" min={previewSeekMin} max={Math.max(previewSeekMin + 0.05, previewSeekMax || 1)} step="0.05" value={previewSeekValue} onChange={(event) => { if (videoRef.current) videoRef.current.currentTime = Number(event.target.value); }} disabled={!source || !duration} />
-          <button className="volume-button" type="button" aria-label={volume > 0 ? 'Mute preview audio' : 'Unmute preview audio'} onClick={() => setVolume((value) => value > 0 ? 0 : 0.8)} disabled={!source}>{volume > 0 ? <Volume2 size={15} /> : <VolumeX size={15} />}</button>
-          <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
-          <span className="preview-quality" title="Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.">Browser preview</span>
-        </div>
+      <div className="editor-main-row">
+        <aside className="editor-media-panel" aria-label="Project media">
+          <div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button></div>
+          {assets.length ? <div className="media-asset-list" aria-label="Media assets">
+            {assets.map((asset) => {
+              const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
+              const available = Boolean(sessionSources[key]);
+              const isVideo = asset.kind === 'video' && Boolean(asset.streams.video);
+              return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
+                <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && selectMediaSource(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
+                  <Film size={15} /><span className="media-asset-copy"><strong>{asset.name}</strong><small>{isVideo ? (available ? 'Ready in this session' : 'Relink required') : `${asset.kind} preview not supported`}</small></span>
+                </button>
+                {isVideo && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
+              </div>;
+            })}
+            <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
+          </div> : <div className="media-empty">
+            <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose a local video to read browser-reported metadata and preview supported formats.</span><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button>
+          </div>}
+          {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
+          <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
+        </aside>
+        <div className="editor-center">
+          <div className="preview-stage"><div className="preview-frame">
+            {source ? <video
+              ref={videoRef}
+              className="preview-video"
+              src={source.url}
+              playsInline
+              preload="metadata"
+              aria-label={`${playableAsset?.name ?? source.name} source preview`}
+              onLoadedMetadata={handlePreviewLoadedMetadata}
+              onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+              onTimeUpdate={handlePreviewTimeUpdate}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onEnded={() => {
+                setIsPlaying(false);
+                if (timelineSyncClip) setTimelinePlayheadFrame(timelineSyncClip.timelineStartFrame + timelineSyncClip.timelineDurationFrames);
+              }}
+              onError={() => { setPlaybackError(true); onPlaybackError(); }}
+            /> : <div className="preview-empty-state"><Film size={35} strokeWidth={1.15} /><span>{playableAsset ? 'Relink this source to preview it in the current session' : assets.length ? 'No supported video source is available to preview' : 'Choose a video to start source preview'}</span>{playableAsset?.kind === 'video' && <button className="button button-secondary button-small preview-relink" type="button" onClick={() => onRelinkVideo(playableAsset.id)} disabled={isReadingMedia}><Upload size={13} />Relink video</button>}</div>}
+            {playbackError && <span className="preview-error" role="status">Browser playback failed for this source.</span>}
+            <div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/>
+            <small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small>
+          </div></div>
+          <div className="preview-controls" aria-label={timelineSyncClip ? 'Timeline clip preview controls' : 'Source preview controls'}>
+            <button className="transport-button" type="button" disabled={!source} title="Seek backward 5 seconds" aria-label="Seek backward 5 seconds" onClick={() => seekBy(-5)}><SkipBack size={15} /></button>
+            <button className="play-button" type="button" disabled={!source} aria-label={isPlaying ? (timelineSyncClip ? 'Pause timeline clip preview' : 'Pause source preview') : (timelineSyncClip ? 'Play timeline clip preview' : 'Play source preview')} onClick={togglePlayback}>{isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+            <button className="transport-button" type="button" disabled={!source} title="Seek forward 5 seconds" aria-label="Seek forward 5 seconds" onClick={() => seekBy(5)}><SkipForward size={15} /></button>
+            <span className="time-readout">{formatPlaybackTime(currentTime)} <i>/</i> {formatPlaybackTime(duration)}</span>
+            <input className="preview-seek" aria-label={timelineSyncClip ? 'Seek timeline clip preview' : 'Seek source video'} type="range" min={previewSeekMin} max={Math.max(previewSeekMin + 0.05, previewSeekMax || 1)} step="0.05" value={previewSeekValue} onChange={(event) => { if (videoRef.current) videoRef.current.currentTime = Number(event.target.value); }} disabled={!source || !duration} />
+            <button className="volume-button" type="button" aria-label={volume > 0 ? 'Mute preview audio' : 'Unmute preview audio'} onClick={() => setVolume((value) => value > 0 ? 0 : 0.8)} disabled={!source}>{volume > 0 ? <Volume2 size={15} /> : <VolumeX size={15} />}</button>
+            <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
+            <span className="preview-quality" title="Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.">Browser preview</span>
+          </div>
 
-      </div>
-      <aside className="properties-panel">
-        <div className="panel-title">Properties</div>
-        <div className="properties-body">
-          {selectedClip ? <div className="property-section selected-clip-properties">
-            <span className="panel-kicker">VIDEO CLIP</span>
-            <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
-            <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
-            <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
-            <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
-              <label htmlFor="clip-start-frame">Timeline start frame</label>
-              <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
-            </form>
-            {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
-              <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
-              <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
-              <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
-            </form>}
-            <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
-          </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
-          <div className="properties-divider"/>
-          <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
         </div>
-      </aside>
-        <div
-          className="timeline-resize-handle"
-          role="separator"
-          aria-label="Resize timeline height"
-          aria-orientation="horizontal"
-          aria-valuemin={TIMELINE_MIN_HEIGHT}
-          aria-valuemax={timelineMaxHeight}
-          aria-valuenow={effectiveTimelineHeight}
-          aria-valuetext={`${effectiveTimelineHeight} pixels`}
-          tabIndex={0}
-          onPointerDown={beginTimelineResize}
-          onPointerMove={moveTimelineResize}
-          onPointerUp={endTimelineResize}
-          onPointerCancel={endTimelineResize}
-          onKeyDown={handleTimelineResizeKey}
-        ><span /></div>
-        <div className="timeline-panel" style={{ height: effectiveTimelineHeight }}>
-          <div className="timeline-heading">
-            <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span>{sequence && <span className="timeline-timecode" aria-label={`Playhead at ${formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}`}>{formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}</span>}</div>
-            <div className="timeline-tools">
-              <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
-              <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
-              <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
-              <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
-              <div className="timeline-zoom" role="group" aria-label="Timeline zoom controls">
-                <button type="button" aria-label="Zoom timeline out" title="Zoom timeline out" disabled={timelineZoom <= 0.25} onClick={() => zoomTimeline(timelineZoom / 1.25)}><ZoomOut size={14} /></button>
-                <input aria-label="Timeline zoom level" type="range" min="0.25" max="4" step="0.05" value={timelineZoom} onChange={(event) => zoomTimeline(Number(event.target.value))} />
-                <button type="button" aria-label="Zoom timeline in" title="Zoom timeline in" disabled={timelineZoom >= 4} onClick={() => zoomTimeline(timelineZoom * 1.25)}><ZoomIn size={14} /></button>
-                <button type="button" aria-label="Fit project in timeline" title="Fit project in timeline" onClick={fitTimelineToProject}><Maximize2 size={14} /></button>
-                <output aria-live="polite">{Math.round(timelineZoom * 100)}%</output>
+        <aside className="properties-panel">
+          <div className="panel-title">Properties</div>
+          <div className="properties-body">
+            {selectedClip ? <div className="property-section selected-clip-properties">
+              <span className="panel-kicker">VIDEO CLIP</span>
+              <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
+              <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
+              <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
+              <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
+                <label htmlFor="clip-start-frame">Timeline start frame</label>
+                <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
+              </form>
+              {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
+                <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+                <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+                <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
+              </form>}
+              <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
+            </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
+            <div className="properties-divider"/>
+            <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
+          </div>
+        </aside>
+      </div>
+      <div
+        className="timeline-resize-handle"
+        role="separator"
+        aria-label="Resize timeline height"
+        aria-orientation="horizontal"
+        aria-valuemin={TIMELINE_MIN_HEIGHT}
+        aria-valuemax={timelineMaxHeight}
+        aria-valuenow={effectiveTimelineHeight}
+        aria-valuetext={`${effectiveTimelineHeight} pixels`}
+        tabIndex={0}
+        onPointerDown={beginTimelineResize}
+        onPointerMove={moveTimelineResize}
+        onPointerUp={endTimelineResize}
+        onPointerCancel={endTimelineResize}
+        onKeyDown={handleTimelineResizeKey}
+      ><span /></div>
+      <div className="timeline-panel" style={{ height: effectiveTimelineHeight }}>
+        <div className="timeline-heading">
+          <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span>{sequence && <span className="timeline-timecode" aria-label={`Playhead at ${formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}`}>{formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}</span>}</div>
+          <div className="timeline-tools">
+            <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
+            <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
+            <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
+            <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
+            <div className="timeline-zoom" role="group" aria-label="Timeline zoom controls">
+              <button type="button" aria-label="Zoom timeline out" title="Zoom timeline out" disabled={timelineZoom <= 0.25} onClick={() => zoomTimeline(timelineZoom / 1.25)}><ZoomOut size={14} /></button>
+              <input aria-label="Timeline zoom level" type="range" min="0.25" max="4" step="0.05" value={timelineZoom} onChange={(event) => zoomTimeline(Number(event.target.value))} />
+              <button type="button" aria-label="Zoom timeline in" title="Zoom timeline in" disabled={timelineZoom >= 4} onClick={() => zoomTimeline(timelineZoom * 1.25)}><ZoomIn size={14} /></button>
+              <button type="button" aria-label="Fit project in timeline" title="Fit project in timeline" onClick={fitTimelineToProject}><Maximize2 size={14} /></button>
+              <output aria-live="polite">{Math.round(timelineZoom * 100)}%</output>
+            </div>
+          </div>
+        </div>
+        {sequence ? <div className="timeline-track-layout">
+          <div className="timeline-track-header-column">
+            <div className="timeline-track-header-ruler" aria-hidden="true" />
+            <div className="timeline-track-header-rows" ref={timelineTrackHeaderRowsRef} style={{ gridTemplateRows: timelineTrackRowTemplate }}>
+              {videoTracks.map((track, trackIndex) => <div className="track-row" key={track.id}>
+                <span className="track-name" title={track.name}><b>V{trackIndex + 1}</b><span>{track.name}</span></span>
+              </div>)}
+              {audioTracks.map((track, trackIndex) => <div className="track-row audio-track" key={track.id}>
+                <span className="track-name" title={track.name}><b>A{trackIndex + 1}</b><span>{track.name}</span></span>
+              </div>)}
+            </div>
+          </div>
+          <div className="timeline-scroll" ref={timelineScrollRef} onScroll={syncTimelineHeaderScroll} onClick={handleTimelineClick} role="region" aria-label="Timeline tracks">
+            <div className="timeline-canvas" style={{ width: timelineContentWidth }}>
+              <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
+                {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
+              </div>
+              <div className="timeline-track-rows" style={{ gridTemplateRows: timelineTrackRowTemplate }}>
+              {videoTracks.map((track) => {
+                const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
+                return <div className="track-row" key={track.id}>
+                  <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
+                    {clips.length ? clips.map((clip) => {
+                      const asset = assets.find((item) => item.id === clip.assetId);
+                      return <button
+                        className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
+                        type="button"
+                        key={clip.id}
+                        style={{ left: clip.timelineStartFrame * timelinePixelsPerFrame, width: Math.max(4, clip.timelineDurationFrames * timelinePixelsPerFrame) }}
+                        aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
+                        aria-pressed={selectedTimelineClipId === clip.id}
+                        title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
+                        onClick={(event) => { event.stopPropagation(); selectTimelineClip(clip, event); }}
+                      >{asset?.name ?? 'Video clip'}</button>;
+                    }) : <div className="empty-track"><span>Select a source in Project media, then choose “Add selected source”</span></div>}
+                  </div>
+                </div>;
+              })}
+              {audioTracks.map((track) => {
+                const clips = track.clips.filter((clip): clip is AudioClip => clip.kind === 'audio');
+                return <div className="track-row audio-track" key={track.id}>
+                  <div className="track-space timeline-track-space audio-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
+                    {clips.length ? clips.map((clip) => {
+                      const asset = assets.find((item) => item.id === clip.assetId);
+                      const startFrame = clip.timelineStartSample / clip.sampleRate * frameRateValue;
+                      const durationFrames = clip.timelineDurationSamples / clip.sampleRate * frameRateValue;
+                      const clipName = asset?.name ?? 'Audio clip';
+                      return <div className="timeline-audio-clip" key={clip.id} role="img" aria-label={`${clipName}; audio editing unavailable`} title={clipName} style={{ left: startFrame * timelinePixelsPerFrame, width: Math.max(8, durationFrames * timelinePixelsPerFrame) }}><span>{clipName}</span></div>;
+                    }) : <div className="empty-audio" title="Audio editing is unavailable in this build"><span>Audio lane disabled</span></div>}
+                  </div>
+                </div>;
+              })}
+              </div>
+              <div ref={timelinePlayheadRef} className="timeline-playhead" style={{ transform: `translateX(${timelinePlayheadFrame * timelinePixelsPerFrame}px)` }}>
+                <button
+                  className="timeline-playhead-grab"
+                  type="button"
+                  role="slider"
+                  aria-label="Timeline playhead"
+                  aria-valuemin={0}
+                  aria-valuemax={timelineCanvasFrames}
+                  aria-valuenow={timelinePlayheadFrame}
+                  aria-valuetext={formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}
+                  onPointerDown={beginPlayheadDrag}
+                  onPointerMove={movePlayheadDrag}
+                  onPointerUp={endPlayheadDrag}
+                  onPointerCancel={endPlayheadDrag}
+                  onKeyDown={handlePlayheadKeyDown}
+                  onClick={(event) => event.stopPropagation()}
+                />
               </div>
             </div>
           </div>
-          {sequence ? <div className="timeline-track-layout">
-            <div className="timeline-track-header-column">
-              <div className="timeline-track-header-ruler" aria-hidden="true" />
-              <div className="timeline-track-header-rows" ref={timelineTrackHeaderRowsRef}>
-                {videoTracks.map((track, trackIndex) => <div className="track-row" key={track.id}>
-                  <span className="track-name" title={track.name}><b>V{trackIndex + 1}</b><span>{track.name}</span></span>
-                </div>)}
-                {audioTracks.map((track, trackIndex) => <div className="track-row audio-track" key={track.id}>
-                  <span className="track-name" title={track.name}><b>A{trackIndex + 1}</b><span>{track.name}</span></span>
-                </div>)}
-              </div>
-            </div>
-            <div className="timeline-scroll" ref={timelineScrollRef} onScroll={syncTimelineHeaderScroll} onClick={handleTimelineClick} role="region" aria-label="Timeline tracks">
-              <div className="timeline-canvas" style={{ width: timelineContentWidth }}>
-                <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
-                  {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
-                </div>
-                {videoTracks.map((track) => {
-                  const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
-                  return <div className="track-row" key={track.id}>
-                    <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
-                      {clips.length ? clips.map((clip) => {
-                        const asset = assets.find((item) => item.id === clip.assetId);
-                        return <button
-                          className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
-                          type="button"
-                          key={clip.id}
-                          style={{ left: clip.timelineStartFrame * timelinePixelsPerFrame, width: Math.max(4, clip.timelineDurationFrames * timelinePixelsPerFrame) }}
-                          aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
-                          aria-pressed={selectedTimelineClipId === clip.id}
-                          title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
-                          onClick={(event) => { event.stopPropagation(); selectTimelineClip(clip, event); }}
-                        >{asset?.name ?? 'Video clip'}</button>;
-                      }) : <div className="empty-track"><span>Select a source in Project media, then choose “Add selected source”</span></div>}
-                    </div>
-                  </div>;
-                })}
-                {audioTracks.map((track) => <div className="track-row audio-track" key={track.id}>
-                  <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}><div className="empty-audio"><span>Audio lane editing unavailable</span></div></div>
-                </div>)}
-                <div ref={timelinePlayheadRef} className="timeline-playhead" style={{ transform: `translateX(${timelinePlayheadFrame * timelinePixelsPerFrame}px)` }}>
-                  <button
-                    className="timeline-playhead-grab"
-                    type="button"
-                    role="slider"
-                    aria-label="Timeline playhead"
-                    aria-valuemin={0}
-                    aria-valuemax={timelineCanvasFrames}
-                    aria-valuenow={timelinePlayheadFrame}
-                    aria-valuetext={formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}
-                    onPointerDown={beginPlayheadDrag}
-                    onPointerMove={movePlayheadDrag}
-                    onPointerUp={endPlayheadDrag}
-                    onPointerCancel={endPlayheadDrag}
-                    onKeyDown={handlePlayheadKeyDown}
-                    onClick={(event) => event.stopPropagation()}
-                  />
-                </div>
-              </div>
-            </div>
-          </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
-        </div>
+        </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
+      </div>
     </div>
     <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>
   </section>;
