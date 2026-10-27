@@ -41,6 +41,14 @@ describe('ClipWright foundation UI', () => {
       'preview-controls',
     ]);
     expect(container.querySelector('.timeline-panel')?.parentElement).toBe(container.querySelector('.editor-layout'));
+    expect([...container.querySelectorAll('.timeline-track-layout > *')].map((element) => element.className)).toEqual([
+      'timeline-track-header-column',
+      'timeline-scroll',
+    ]);
+    const timelineScroller = container.querySelector('.timeline-scroll') as HTMLDivElement;
+    const trackHeaders = container.querySelector('.timeline-track-header-rows') as HTMLDivElement;
+    fireEvent.scroll(timelineScroller, { target: { scrollTop: 42, scrollLeft: 50 } });
+    expect(trackHeaders.style.transform).toBe('translateY(-42px)');
     fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize timeline height' }), { key: 'ArrowUp' });
     expect(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow')).toBe('296');
     expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe('296');
