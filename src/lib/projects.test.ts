@@ -23,6 +23,15 @@ describe('project persistence', () => {
     expect(validateProject(created)).toBe(true);
   });
 
+  it('retains custom imported aspect ratios and fractional display frame rates in the dashboard index', () => {
+    const storage = memoryStorage();
+    const project = { ...createProject('Custom source', '16:9', 30), aspectRatio: '4:3', frameRate: 30000 / 1001 };
+    writeProjects(storage, [project]);
+    expect(readProjects(storage)).toEqual([project]);
+    expect(validateProject({ ...project, aspectRatio: '0:9' })).toBe(false);
+    expect(validateProject({ ...project, frameRate: 0 })).toBe(false);
+  });
+
   it('rejects blank names', () => {
     expect(() => createProject('  ', '16:9', 24)).toThrow('Enter a project name.');
   });

@@ -4,7 +4,7 @@ Status: foundation only. These decisions establish seams and priorities, not a c
 
 ## Current implementation
 
-The current runnable increment is a TypeScript/React renderer built with Vite. Workspace selection is held in React state. Project-list records pass through `src/lib/projects.ts`, which validates their basic shape before reading localStorage. The localStorage adapter is intentionally isolated so it can be replaced by a desktop persistence adapter. The current browser app does **not** expose unrestricted filesystem or shell APIs. A version-1 `ProjectDocument` is now used by project creation and downloaded as a user-triggered `.cwproject` JSON file. Project payloads remain in a separate browser-local storage key; see [the schema and storage limitations](PROJECT_SCHEMA.md).
+The current runnable increment is a TypeScript/React renderer built with Vite. Workspace selection is held in React state. Project-list records pass through `src/lib/projects.ts`, which validates their basic shape before reading localStorage. The localStorage adapter is intentionally isolated so it can be replaced by a desktop persistence adapter. The current browser app does **not** expose unrestricted filesystem or shell APIs. A version-1 `ProjectDocument` is used by project creation, local-file open/import, and user-triggered `.cwproject` JSON downloads. Project payloads remain in a separate browser-local storage key; see [the schema and storage limitations](PROJECT_SCHEMA.md).
 
 ## Target Windows architecture
 

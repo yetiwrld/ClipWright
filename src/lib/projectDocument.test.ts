@@ -9,6 +9,7 @@ import {
   serializeProjectDocument,
   validateProjectDocument,
   writeProjectDocuments,
+  type AudioClip,
   type VideoClip,
 } from './projectDocument';
 
@@ -57,6 +58,26 @@ describe('versioned project documents', () => {
     expect(() => parseProjectDocument(JSON.stringify({ ...document, schemaVersion: 42 }))).toThrow('Unsupported project schema version: 42');
   });
 
+  it('keeps audio sample timing aligned with the exact rational sequence duration', () => {
+    const document = createProjectDocument(createProject('Audio timing', '16:9', 30));
+    const sequence = document.sequences[0];
+    sequence.durationFrames = 30;
+    document.assets.push({
+      id: 'audio-asset', name: 'Dialogue', sourcePath: 'media/dialogue.wav', pathKind: 'project-relative', kind: 'audio',
+      streams: { audio: { timeBase: { numerator: 1, denominator: 48000 }, durationTicks: 96000, sampleRate: 48000, channels: 2 } },
+    });
+    const audioClip: AudioClip = {
+      id: 'audio-clip', assetId: 'audio-asset', kind: 'audio', sourceInTick: 0, sourceOutTick: 48000,
+      timelineStartSample: 0, timelineDurationSamples: 48000, sampleRate: 48000, playbackRate: { numerator: 1, denominator: 1 },
+    };
+    sequence.tracks[1].clips.push(audioClip);
+    expect(validateProjectDocument(document).valid).toBe(true);
+    audioClip.timelineDurationSamples = 48001;
+    const result = validateProjectDocument(document);
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.errors.join(' ')).toContain('extends beyond the sequence duration');
+  });
+
   it('round trips documents through local storage and never repairs malformed data implicitly', () => {
     const values = new Map<string, string>();
     const storage = {
@@ -90,6 +111,11 @@ describe('versioned project documents', () => {
     };
     videoTrack.clips.push(videoClip);
     expect(validateProjectDocument(document).valid).toBe(true);
+    document.assets[0].sourcePath = 'https://example.invalid/source.mp4';
+    const remotePathResult = validateProjectDocument(document);
+    expect(remotePathResult.valid).toBe(false);
+    if (!remotePathResult.valid) expect(remotePathResult.errors.join(' ')).toContain('must be a local path, not a URI');
+    document.assets[0].sourcePath = 'media/source.mp4';
     videoClip.timelineStartFrame = 250;
     let result = validateProjectDocument(document);
     expect(result.valid).toBe(false);

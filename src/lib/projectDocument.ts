@@ -81,12 +81,38 @@ const isString = (value: unknown): value is string => typeof value === 'string' 
 const isInteger = (value: unknown, min = 0): value is number => Number.isSafeInteger(value) && (value as number) >= min;
 const isRational = (value: unknown): value is Rational => isObject(value)
   && isInteger(value.numerator, 1) && isInteger(value.denominator, 1);
+const isFrameRate = (value: unknown): value is Rational => isRational(value)
+  && value.numerator / value.denominator >= 1 && value.numerator / value.denominator <= 240;
 const isDate = (value: unknown): value is string => isString(value) && Number.isFinite(Date.parse(value));
 const isSampleRate = (value: unknown): value is number => isInteger(value, 8000) && (value as number) <= 384000;
 const isDimension = (value: unknown): value is number => isInteger(value, 16) && (value as number) <= 16384;
 
+function reduceRational(numerator: number, denominator: number): Rational {
+  const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+  const divisor = gcd(Math.abs(numerator), Math.abs(denominator));
+  return { numerator: numerator / divisor, denominator: denominator / divisor };
+}
+
+function decimalToRational(value: number): Rational {
+  const places = Math.min((String(value).split('.')[1] ?? '').length, 6);
+  const denominator = 10 ** places;
+  return reduceRational(Math.round(value * denominator), denominator);
+}
+
 export function createProjectDocument(project: Project, appVersion = '0.1.0', makeId: (entity: 'sequence' | 'video-track' | 'audio-track') => string = () => crypto.randomUUID()): ProjectDocument {
-  const [width, height] = project.aspectRatio === '9:16' ? [1080, 1920] : project.aspectRatio === '1:1' ? [1080, 1080] : [1920, 1080];
+  const ratioParts = project.aspectRatio.split(':').map(Number);
+  const ratioWidth = ratioParts[0] || 16;
+  const ratioHeight = ratioParts[1] || 9;
+  let width: number;
+  let height: number;
+  if (project.aspectRatio === '16:9') { width = 1920; height = 1080; }
+  else if (project.aspectRatio === '9:16') { width = 1080; height = 1920; }
+  else if (project.aspectRatio === '1:1') { width = 1080; height = 1080; }
+  else {
+    const scale = Math.max(16 / ratioWidth, 16 / ratioHeight, Math.min(1080 / ratioHeight, 16384 / ratioWidth, 16384 / ratioHeight));
+    width = Math.round(ratioWidth * scale);
+    height = Math.round(ratioHeight * scale);
+  }
   const sequenceId = makeId('sequence');
   const createdAt = isDate(project.createdAt) ? project.createdAt : new Date().toISOString();
   const modifiedAt = isDate(project.updatedAt) ? project.updatedAt : createdAt;
@@ -102,7 +128,7 @@ export function createProjectDocument(project: Project, appVersion = '0.1.0', ma
       name: 'Sequence 01',
       width,
       height,
-      frameRate: { numerator: project.frameRate, denominator: 1 },
+      frameRate: decimalToRational(project.frameRate),
       audioSampleRate: 48000,
       durationFrames: 0,
       tracks: [
@@ -117,7 +143,7 @@ function validateStream(value: unknown, path: string, errors: string[]): value i
   if (!isObject(value)) { errors.push(`${path} must be an object.`); return false; }
   if (!isRational(value.timeBase)) errors.push(`${path}.timeBase must be a positive rational.`);
   if (!isInteger(value.durationTicks, 1)) errors.push(`${path}.durationTicks must be a positive safe integer.`);
-  if (value.frameRate !== undefined && !isRational(value.frameRate)) errors.push(`${path}.frameRate must be a positive rational.`);
+  if (value.frameRate !== undefined && !isFrameRate(value.frameRate)) errors.push(`${path}.frameRate must be a rational from 1 to 240 fps.`);
   if (value.width !== undefined && !isDimension(value.width)) errors.push(`${path}.width must be between 16 and 16384.`);
   if (value.height !== undefined && !isDimension(value.height)) errors.push(`${path}.height must be between 16 and 16384.`);
   if (value.sampleRate !== undefined && !isSampleRate(value.sampleRate)) errors.push(`${path}.sampleRate must be between 8000 and 384000 Hz.`);
@@ -159,6 +185,14 @@ export function validateProjectDocument(value: unknown): ValidationResult {
     if (!isString(asset.name)) errors.push(`${path}.name must be a non-empty string.`);
     if (!isString(asset.sourcePath) || asset.sourcePath.includes('\0')) errors.push(`${path}.sourcePath must be a non-empty local path without NUL bytes.`);
     if (!['absolute', 'project-relative'].includes(String(asset.pathKind))) errors.push(`${path}.pathKind must be absolute or project-relative.`);
+    if (isString(asset.sourcePath)) {
+      const driveAbsolute = /^[A-Za-z]:[\\/]/.test(asset.sourcePath);
+      const isAbsolute = driveAbsolute || asset.sourcePath.startsWith('/') || asset.sourcePath.startsWith('\\\\');
+      const hasUriScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(asset.sourcePath) && !driveAbsolute;
+      if (hasUriScheme) errors.push(`${path}.sourcePath must be a local path, not a URI.`);
+      if (asset.pathKind === 'absolute' && !isAbsolute) errors.push(`${path}.sourcePath must be absolute when pathKind is absolute.`);
+      if (asset.pathKind === 'project-relative' && isAbsolute) errors.push(`${path}.sourcePath must be relative when pathKind is project-relative.`);
+    }
     if (!['video', 'audio', 'image'].includes(String(asset.kind))) errors.push(`${path}.kind is unsupported.`);
     if (!isObject(asset.streams)) { errors.push(`${path}.streams must be an object.`); return; }
     if (asset.streams.video !== undefined) validateStream(asset.streams.video, `${path}.streams.video`, errors);
@@ -181,7 +215,7 @@ export function validateProjectDocument(value: unknown): ValidationResult {
     if (!isString(sequence.name)) errors.push(`${path}.name must be a non-empty string.`);
     if (!isDimension(sequence.width)) errors.push(`${path}.width must be between 16 and 16384.`);
     if (!isDimension(sequence.height)) errors.push(`${path}.height must be between 16 and 16384.`);
-    if (!isRational(sequence.frameRate)) errors.push(`${path}.frameRate must be a positive rational.`);
+    if (!isFrameRate(sequence.frameRate)) errors.push(`${path}.frameRate must be a rational from 1 to 240 fps.`);
     if (!isSampleRate(sequence.audioSampleRate)) errors.push(`${path}.audioSampleRate must be between 8000 and 384000 Hz.`);
     if (!isInteger(sequence.durationFrames)) errors.push(`${path}.durationFrames must be a non-negative safe integer.`);
     if (!Array.isArray(sequence.tracks)) { errors.push(`${path}.tracks must be an array.`); return; }
@@ -223,7 +257,14 @@ export function validateProjectDocument(value: unknown): ValidationResult {
         } else if (clip.kind === 'audio') {
           if (!isInteger(clip.timelineStartSample)) errors.push(`${clipPath}.timelineStartSample must be a non-negative sample index.`);
           if (!isInteger(clip.timelineDurationSamples, 1)) errors.push(`${clipPath}.timelineDurationSamples must be a positive sample count.`);
-          if (isInteger(clip.timelineStartSample) && isInteger(clip.timelineDurationSamples, 1) && !Number.isSafeInteger(clip.timelineStartSample + clip.timelineDurationSamples)) errors.push(`${clipPath} timeline sample end exceeds the safe integer range.`);
+          if (isInteger(clip.timelineStartSample) && isInteger(clip.timelineDurationSamples, 1)) {
+            const sampleEnd = clip.timelineStartSample + clip.timelineDurationSamples;
+            if (!Number.isSafeInteger(sampleEnd)) errors.push(`${clipPath} timeline sample end exceeds the safe integer range.`);
+            else if (isInteger(sequence.durationFrames) && isFrameRate(sequence.frameRate) && isSampleRate(sequence.audioSampleRate)
+              && BigInt(sampleEnd) * BigInt(sequence.frameRate.numerator) > BigInt(sequence.durationFrames) * BigInt(sequence.frameRate.denominator) * BigInt(sequence.audioSampleRate)) {
+              errors.push(`${clipPath} extends beyond the sequence duration.`);
+            }
+          }
           if (!isSampleRate(clip.sampleRate)) errors.push(`${clipPath}.sampleRate must be between 8000 and 384000 Hz.`);
           if (isSampleRate(clip.sampleRate) && isSampleRate(sequence.audioSampleRate) && clip.sampleRate !== sequence.audioSampleRate) errors.push(`${clipPath}.sampleRate must match its sequence audio sample rate.`);
         }
@@ -247,13 +288,14 @@ export function validateProjectDocument(value: unknown): ValidationResult {
 
 /** Convert the foundation's pre-document project-list record into an empty v1 project file. */
 export function migrateLegacyProjectEntry(value: unknown): ProjectDocument {
+  const ratioMatch = isObject(value) && typeof value.aspectRatio === 'string' ? /^(\d{1,5}):(\d{1,5})$/.exec(value.aspectRatio) : null;
   if (!isObject(value)
     || !isString(value.id)
     || !isString(value.name)
     || !isDate(value.createdAt)
     || !isDate(value.updatedAt)
-    || !['16:9', '9:16', '1:1'].includes(String(value.aspectRatio))
-    || ![24, 25, 30, 60].includes(Number(value.frameRate))) {
+    || !ratioMatch || Number(ratioMatch[1]) < 1 || Number(ratioMatch[2]) < 1 || Number(ratioMatch[1]) > 16384 || Number(ratioMatch[2]) > 16384 || Number(ratioMatch[1]) / Number(ratioMatch[2]) < 1 / 1024 || Number(ratioMatch[1]) / Number(ratioMatch[2]) > 1024
+    || !Number.isFinite(value.frameRate) || Number(value.frameRate) < 1 || Number(value.frameRate) > 240) {
     throw new Error('This legacy project entry is incomplete and cannot be migrated safely.');
   }
   const project: Project = {

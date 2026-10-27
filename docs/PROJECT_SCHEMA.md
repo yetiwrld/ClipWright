@@ -1,10 +1,10 @@
 # ClipWright project document schema — v1
 
-Status: implemented as a validated TypeScript data contract; integrated with project creation, browser-local document storage, and `.cwproject` downloads. Media import, relinking, timeline mutation, opening downloaded files through the application, atomic filesystem writes, and crash recovery are not yet implemented.
+Status: implemented as a validated TypeScript data contract; integrated with project creation, browser-local document storage, `.cwproject` downloads, and validated local-file open/import. Imported media paths are preserved but not checked/relinked. Timeline mutation, atomic filesystem writes, and crash recovery are not yet implemented.
 
 ## Why two stores exist
 
-The dashboard project entry (`projects.ts`) is a small index record used for names, favourites, archive state, and sorting. A `ProjectDocument` is the actual structured project payload. In this browser foundation, the document payload is stored separately under `clipwright.project-documents.v1`; it is **not** a managed on-disk project file. The card action “Download .cwproject” serializes a validated copy for the user’s browser download folder. The file contains project metadata and the default empty sequence/tracks; it does not include source media, and there is no project-file open/import command yet.
+The dashboard project entry (`projects.ts`) is a small index record used for names, favourites, archive state, and sorting. A `ProjectDocument` is the actual structured project payload. In this browser foundation, documents are stored separately under `clipwright.project-documents.v1`; this is not a managed project-folder adapter. “Download .cwproject” serializes a validated copy to the browser’s download flow. “Open project file” reads a local `.cwproject`/JSON file, validates it before state changes, and adds it to the dashboard. ID collisions are imported as a separate copy with a new project ID rather than replacing existing data. The file contains supported project structure and media path references, but does not include source media.
 
 ## v1 shape
 
@@ -17,7 +17,7 @@ The dashboard project entry (`projects.ts`) is a small index record used for nam
 - `tracks[]` currently support video/audio kind, name, mute/lock flags, and clips.
 - Video clips use integer `timelineStartFrame` and `timelineDurationFrames`; audio clips use integer `timelineStartSample` and `timelineDurationSamples` plus an explicit sample rate. Source ranges use integer stream ticks, interpreted using that source stream’s rational `timeBase` (seconds per tick). Playback rate is rational.
 
-Rationals use `{ "numerator": n, "denominator": d }` with positive safe integers. For example, 29.97 fps is stored exactly as `{ "numerator": 30000, "denominator": 1001 }`, not as a binary floating-point seconds value.
+Rationals use `{ "numerator": n, "denominator": d }` with positive safe integers; video frame rates are constrained to 1–240 fps. For example, 29.97 fps is stored exactly as `{ "numerator": 30000, "denominator": 1001 }`, not as a binary floating-point seconds value.
 
 ## Validation and serialization
 
@@ -33,4 +33,4 @@ On application startup, the app fills in missing v1 documents for valid legacy d
 
 ## Persistence limits
 
-Browser localStorage is an interim adapter with limited capacity and no atomic file-write guarantee. A download is a user-triggered JSON copy, not autosave. It does not overwrite an existing file through an application-managed safe-replacement flow. Do not use this foundation as the only copy of important production work. The Windows desktop storage adapter should later provide user-selected project locations, validated load/import, atomic save, checkpoints, and recovery before relying on this model for real editing projects.
+Browser localStorage is an interim adapter with limited capacity and no atomic file-write guarantee. Opening a project file imports its document into browser storage; a download is a user-triggered JSON snapshot, not autosave. It does not overwrite an existing file through an application-managed safe-replacement flow, and the source media is not packaged. Do not use this foundation as the only copy of important production work. The Windows desktop storage adapter should later provide user-selected project locations, validated load/import, atomic save, checkpoints, and recovery before relying on this model for real editing projects.

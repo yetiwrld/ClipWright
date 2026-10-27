@@ -2,7 +2,7 @@
 
 ClipWright Studio is the starting point for a local-first Windows video editor and AI-assisted clipping application. The supplied ClipWright icon is included as a replaceable asset; the wordmark and Graphite + Electric Orange theme are deliberately easy to change.
 
-> **Current status — foundation build (0.1.0).** This is an early React + TypeScript application shell, not yet a Windows desktop editor. It has a functional local project dashboard, versioned project-document schema, `.cwproject` JSON downloads, theme switching, and a searchable command palette. Downloaded files contain project metadata and an empty sequence scaffold; they do not contain media, and opening/importing them is not yet implemented. Media ingestion, playback, timeline editing, transcription, AI clipping, and rendering are not implemented. The UI labels these limitations rather than simulating their results.
+> **Current status — foundation build (0.1.0).** This is an early React + TypeScript application shell, not yet a Windows desktop editor. It has a functional local project dashboard, versioned project-document schema, `.cwproject` JSON downloads, theme switching, and a searchable command palette. The app can open/import `.cwproject` files and download project snapshots. Files contain project metadata, sequence/track data, and media path references, but never media bytes. Media ingestion, playback, timeline editing, transcription, AI clipping, and rendering are not implemented. The UI labels these limitations rather than simulating their results.
 
 ## Run locally
 
@@ -26,14 +26,15 @@ npm run build
 - Create projects with aspect ratio and frame-rate preferences.
 - Persist project-list entries and version-1 project documents in browser local storage, scoped to the browser profile.
 - Create projects with a default video/audio sequence, integer frame-based video timing, sample-based audio timing, and rational frame rates.
-- Download a validated `.cwproject` JSON document from a project card; source media is not included.
+- Download a validated `.cwproject` JSON document from a project card and open/import it from a local file picker; source media is not included.
+- Imports validate the schema before changing state, preserve exact sequence settings, and open ID collisions as separate copies instead of replacing existing projects.
 - Migrate the foundation’s earlier project-list records into empty v1 documents; preserve unreadable data until the user confirms recovery.
 - Open, rename, duplicate, favourite, archive/restore, search, and delete project entries.
 - Deletion is confirmed and removes only local project entries/documents; it never deletes media.
 - Dark and light themes, keyboard shortcuts (`Ctrl/Cmd+K`, `Ctrl/Cmd+N`), a working command palette, and task-centre status.
 - Honest, explicit unavailable states for the not-yet-built editor and AI/media processing systems.
 
-The `.cwproject` download is a portable JSON document, but its current supported content is limited to project metadata and an empty sequence scaffold; media files are never bundled. The application cannot yet open a downloaded file. Browser storage is interim and may be cleared, so do not use it as the only copy of important work.
+A `.cwproject` file is a portable JSON document that can be reopened by this foundation. It preserves supported project structure and references to source paths, but does not bundle media. Browser storage is interim and may be cleared; downloads are user-triggered snapshots rather than autosaved files, so do not rely on browser storage as the only copy of important work.
 
 ## Repository guide
 

@@ -15,7 +15,7 @@
 | Desktop shell / routing | Missing | Browser-rendered React workspace shell; Electron/Windows shell not present |
 | Design system | Missing | Graphite/orange tokens, dark/light variables, responsive layouts |
 | Project schema | Missing | Version-1 validated project document with integer frame/sample positions, rational timebases, basic media/track/clip contracts, and legacy-entry migration; no editing operations |
-| Project persistence | Missing | Browser localStorage project index + document store and user-triggered `.cwproject` download; no managed filesystem, file import, atomic save, autosave, or crash recovery |
+| Project persistence | Missing | Browser localStorage index/document stores, validated `.cwproject` open/import and download; no managed filesystem, atomic save, autosave, or crash recovery |
 | Media ingestion / metadata | Missing | Not implemented; UI truthfully reports this |
 | Preview / timeline / edits | Missing | Static editor foundation only; no media playback or editing commands |
 | FFmpeg / rendering | Missing | No FFmpeg dependency or render implementation |
@@ -27,7 +27,7 @@
 ## Baseline and current verification
 
 - Baseline build/test: not applicable; no package manifest or application existed.
-- Foundation checks on 2026-10-27 (Node 22.22.3): `npm test` passed (14 tests across 3 files); `npm run build` passed (strict TypeScript check and Vite production bundle); `npm audit --audit-level=moderate` reported 0 vulnerabilities; `git diff --check` passed.
+- Foundation checks on 2026-10-27 (Node 22.22.3): `npm test` passed (19 tests across 3 files); `npm run build` passed (strict TypeScript check and Vite production bundle); `npm audit --audit-level=moderate` reported 0 vulnerabilities; `git diff --check` passed.
 - The Vite dev server started successfully on port 5173 and served the app entry point and supplied icon. No browser binary was installed in the container, so direct visual screenshot QA was not performed.
 - No Windows build, media workflow, or export has been verified.
 

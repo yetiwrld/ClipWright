@@ -1,8 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
-import { createProject, PROJECTS_KEY } from './lib/projects';
-import { PROJECT_DOCUMENTS_KEY } from './lib/projectDocument';
+import { createProject, PROJECTS_KEY, writeProjects } from './lib/projects';
+import { createProjectDocument, PROJECT_DOCUMENTS_KEY, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -54,6 +54,61 @@ describe('ClipWright foundation UI', () => {
     expect(serialized).not.toContain('media bytes');
   });
 
+  it('opens a validated project file and preserves exact sequence settings', async () => {
+    const source = createProject('Imported interview', '16:9', 30);
+    const document = createProjectDocument(source);
+    document.sequences[0].width = 1440;
+    document.sequences[0].height = 1080;
+    document.sequences[0].frameRate = { numerator: 30000, denominator: 1001 };
+    const contents = serializeProjectDocument(document);
+    const file = new File([contents], 'interview.cwproject', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: async () => contents });
+    const { container } = render(<App />);
+    const input = container.querySelector('input[type="file"]');
+    expect(input).toBeTruthy();
+    fireEvent.change(input!, { target: { files: [file] } });
+
+    expect(await screen.findByRole('heading', { name: 'Imported interview' })).toBeTruthy();
+    expect(screen.getAllByText('4:3')).toHaveLength(2);
+    expect(screen.getAllByText('29.97 fps')).toHaveLength(2);
+    const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(saved[0].sequences[0].frameRate).toEqual({ numerator: 30000, denominator: 1001 });
+    expect(saved[0].sequences[0].width).toBe(1440);
+  });
+
+  it('rejects an invalid project file without adding a partial project entry', async () => {
+    const badContents = '{broken';
+    const file = new File([badContents], 'broken.cwproject', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: async () => badContents });
+    const { container } = render(<App />);
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    expect(await screen.findByText(/not valid JSON/i)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Projects' })).toBeTruthy();
+    expect(JSON.parse(window.localStorage.getItem(PROJECTS_KEY) ?? '[]')).toHaveLength(0);
+  });
+
+  it('imports an ID collision as a separate copy instead of replacing existing data', async () => {
+    const existing = createProject('Existing local project', '16:9', 24);
+    const existingDocument = createProjectDocument(existing);
+    writeProjects(window.localStorage, [existing]);
+    writeProjectDocuments(window.localStorage, [existingDocument]);
+    const incoming = createProjectDocument({ ...existing, name: 'Imported copy' });
+    const contents = serializeProjectDocument(incoming);
+    const file = new File([contents], 'copy.cwproject', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: async () => contents });
+    const { container } = render(<App />);
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+
+    expect(await screen.findByRole('heading', { name: 'Imported copy' })).toBeTruthy();
+    expect(screen.getByText(/separate project copy/i)).toBeTruthy();
+    const savedProjects = JSON.parse(window.localStorage.getItem(PROJECTS_KEY) ?? '[]');
+    const savedDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(savedProjects).toHaveLength(2);
+    expect(savedDocuments).toHaveLength(2);
+    expect(savedProjects[0].id).not.toBe(existing.id);
+    expect(savedDocuments.find((doc: { id: string }) => doc.id === existing.id).metadata.name).toBe('Existing local project');
+  });
+
   it('preserves unreadable project documents and rebuilds only after confirmation', () => {
     const project = createProject('Recover project', '16:9', 30);
     window.localStorage.setItem(PROJECTS_KEY, JSON.stringify([project]));
@@ -89,6 +144,7 @@ describe('ClipWright foundation UI', () => {
     render(<App />);
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     const input = await screen.findByPlaceholderText('Type a command…');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });

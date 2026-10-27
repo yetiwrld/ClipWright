@@ -3,12 +3,12 @@ import {
   Archive, ArrowLeft, ArrowRight, Check, ChevronDown, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
   Grid2X2, HardDrive, Heart, Home, Keyboard, LayoutPanelLeft, ListFilter,
-  MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2,
+  MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload,
   X, type LucideIcon,
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import type { AspectRatio, Project } from './lib/projects';
-import { createProjectDocument, migrateLegacyProjectEntry, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
+import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { ProjectDocument } from './lib/projectDocument';
 
 type Workspace = 'home' | 'clipping' | 'editor';
@@ -23,6 +23,16 @@ const workspaceItems: { id: Workspace; label: string; icon: LucideIcon }[] = [
 function readableDate(date: string) {
   const parsed = new Date(date);
   return Number.isNaN(parsed.getTime()) ? 'Unknown date' : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(parsed);
+}
+
+function formatFrameRate(value: number) {
+  return `${Number.isInteger(value) ? value : Number(value.toFixed(3))} fps`;
+}
+
+function aspectRatioOf(width: number, height: number) {
+  const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+  const divisor = gcd(width, height);
+  return `${width / divisor}:${height / divisor}`;
 }
 
 export default function App() {
@@ -53,6 +63,7 @@ export default function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('clipwright.theme') === 'light' ? 'light' : 'dark');
   const searchRef = useRef<HTMLInputElement>(null);
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const persistenceWarning = storageWarning ?? documentStorageWarning;
@@ -91,7 +102,7 @@ export default function App() {
         event.preventDefault(); setShowCommands((open) => !open);
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
-        event.preventDefault(); setShowCreate(true);
+        event.preventDefault(); if (!persistenceWarning) setShowCreate(true);
       }
       if (event.key === 'Escape') {
         setShowCreate(false); setShowSettings(false); setShowCommands(false); setShowTasks(false);
@@ -99,7 +110,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [persistenceWarning]);
 
   function notify(message: string, kind: Toast['kind'] = 'success') {
     const id = Date.now();
@@ -183,6 +194,51 @@ export default function App() {
       notify(`Downloaded ${safeName}.cwproject. Source media is not included.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not create the project file.', 'error');
+    }
+  }
+
+  function requestProjectFile() {
+    if (persistenceWarning) {
+      notify('Resolve the project storage warning before opening a project file.', 'error');
+      return;
+    }
+    projectFileInputRef.current?.click();
+  }
+
+  async function importProjectFile(file: File | null) {
+    if (!file) return;
+    if (storageWarning || documentStorageWarning) {
+      notify('Resolve the project storage warning before importing a project file.', 'error');
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      notify('Project file exceeds the 25 MB safety limit.', 'error');
+      return;
+    }
+    try {
+      const incomingDocument = parseProjectDocument(await file.text());
+      const sequence = incomingDocument.sequences.find((item) => item.id === incomingDocument.projectSettings.defaultSequenceId);
+      if (!sequence) throw new Error('The project file does not contain its declared default sequence.');
+      const idConflict = projects.some((project) => project.id === incomingDocument.id) || documents.some((document) => document.id === incomingDocument.id);
+      const projectId = idConflict ? crypto.randomUUID() : incomingDocument.id;
+      const importedDocument = projectId === incomingDocument.id ? incomingDocument : { ...incomingDocument, id: projectId };
+      const project: Project = {
+        id: projectId,
+        name: incomingDocument.metadata.name,
+        createdAt: incomingDocument.metadata.createdAt,
+        updatedAt: incomingDocument.metadata.modifiedAt,
+        aspectRatio: aspectRatioOf(sequence.width, sequence.height),
+        frameRate: sequence.frameRate.numerator / sequence.frameRate.denominator,
+        archived: false,
+        favorite: false,
+      };
+      setProjects((current) => [project, ...current]);
+      setDocuments((current) => [...current, importedDocument]);
+      setActiveProjectId(project.id);
+      setWorkspace('editor');
+      notify(idConflict ? 'Opened as a separate project copy to protect the existing project.' : `Opened “${project.name}”.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not open this project file.', 'error');
     }
   }
 
@@ -281,7 +337,7 @@ export default function App() {
             <section className="dashboard-view">
               <div className="welcome-row">
                 <div><div className="eyebrow">YOUR CREATIVE WORKSPACE</div><h1>Projects</h1><p className="page-description">Pick up where you left off, or start something new.</p></div>
-                <button className="button button-primary" onClick={() => setShowCreate(true)} disabled={!!persistenceWarning} title={persistenceWarning ? 'Resolve the storage warning before creating projects' : undefined}><Plus size={17} />New project</button>
+                <div className="welcome-actions"><button className="button button-secondary" onClick={requestProjectFile} disabled={!!persistenceWarning} title={persistenceWarning ? 'Resolve the storage warning before opening projects' : undefined}><Upload size={15} />Open project file</button><button className="button button-primary" onClick={() => setShowCreate(true)} disabled={!!persistenceWarning} title={persistenceWarning ? 'Resolve the storage warning before creating projects' : undefined}><Plus size={17} />New project</button></div>
               </div>
               {persistenceWarning && <div className="storage-warning" role="alert"><div><strong>{storageWarning === 'invalid-data' ? 'Project list could not be read' : documentStorageWarning === 'invalid-data' ? 'Project documents could not be read' : 'Browser storage is unavailable'}</strong><p>{storageWarning === 'invalid-data' ? 'The existing list has not been overwritten. Preserve a recovery copy before starting over.' : documentStorageWarning === 'invalid-data' ? 'The existing documents have not been overwritten. Recovery will rebuild empty documents from your project list.' : 'This browser profile cannot currently save all project data.'}</p></div>{storageWarning === 'invalid-data' ? <button className="button button-secondary button-small" onClick={startFreshProjectList}>Preserve & start fresh</button> : !storageWarning && documentStorageWarning === 'invalid-data' ? <button className="button button-secondary button-small" onClick={startFreshDocumentStore}>Preserve & rebuild</button> : null}</div>}
               <div className="dashboard-tools">
@@ -314,15 +370,17 @@ export default function App() {
             </section>
           )}
 
-          {workspace === 'editor' && <EditorFoundation project={activeProject} onBack={() => navigate('home')} onImportUnavailable={() => notify('Media import is the next implementation milestone; no files have been changed.', 'error')} />}
+          {workspace === 'editor' && <EditorFoundation project={activeProject} projectDocument={documents.find((document) => document.id === activeProjectId) ?? null} onBack={() => navigate('home')} onImportUnavailable={() => notify('Media import is the next implementation milestone; no files have been changed.', 'error')} />}
           {workspace === 'clipping' && <ClippingFoundation onCreate={() => setShowCreate(true)} />}
         </main>
       </div>
 
+      <input ref={projectFileInputRef} hidden type="file" accept=".cwproject,application/json" aria-label="Choose a ClipWright project file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importProjectFile(file); }} />
       {showCreate && <CreateProjectDialog onClose={() => setShowCreate(false)} onCreate={createNewProject} />}
       {showSettings && <SettingsDialog theme={theme} onTheme={setTheme} onClose={() => setShowSettings(false)} />}
       {showCommands && <CommandDialog inputRef={searchRef} onClose={() => setShowCommands(false)} actions={[
-        { label: 'Create a new project', shortcut: 'Ctrl+N', icon: FilePlus2, run: () => { setShowCommands(false); setShowCreate(true); } },
+        { label: 'Create a new project', shortcut: 'Ctrl+N', icon: FilePlus2, run: () => { setShowCommands(false); if (persistenceWarning) notify('Resolve the project storage warning before creating a project.', 'error'); else setShowCreate(true); } },
+        { label: 'Open a project file', icon: Upload, run: () => { setShowCommands(false); requestProjectFile(); } },
         { label: 'Go to Projects', shortcut: 'G then P', icon: Home, run: () => { navigate('home'); setShowCommands(false); } },
         { label: 'Open AI Clipping', icon: Sparkles, run: () => { navigate('clipping'); setShowCommands(false); } },
         { label: 'Open Editor workspace', icon: Clapperboard, run: () => { if (activeProject) setWorkspace('editor'); else notify('Create or open a project before entering the editor.', 'error'); setShowCommands(false); } },
@@ -344,7 +402,7 @@ function ProjectCard({ project, index, onOpen, onRename, onDuplicate, onArchive,
     </button>
     <div className="project-card-info">
       <div className="project-name-row"><button className="project-name" onClick={onOpen}>{project.name}</button>{project.favorite && <Heart size={13} fill="currentColor" className="favorite-mark" />}</div>
-      <div className="project-meta">Edited {readableDate(project.updatedAt)} <span>·</span> {project.frameRate} fps</div>
+      <div className="project-meta">Edited {readableDate(project.updatedAt)} <span>·</span> {formatFrameRate(project.frameRate)}</div>
     </div>
     <button className="card-menu-trigger" aria-label={`More actions for ${project.name}`} aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal size={17} /></button>
     {menuOpen && <><button className="click-away" aria-label="Close project menu" onClick={() => setMenuOpen(false)} /><div className="project-menu">
@@ -379,13 +437,17 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
   </div>;
 }
 
-function EditorFoundation({ project, onBack, onImportUnavailable }: { project: Project | null; onBack: () => void; onImportUnavailable: () => void }) {
+function EditorFoundation({ project, projectDocument, onBack, onImportUnavailable }: { project: Project | null; projectDocument: ProjectDocument | null; onBack: () => void; onImportUnavailable: () => void }) {
+  const sequence = projectDocument?.sequences.find((item) => item.id === projectDocument.projectSettings.defaultSequenceId) ?? null;
+  const ratio = sequence ? aspectRatioOf(sequence.width, sequence.height) : project?.aspectRatio ?? '16:9';
+  const frameRate = sequence ? formatFrameRate(sequence.frameRate.numerator / sequence.frameRate.denominator) : formatFrameRate(project?.frameRate ?? 30);
+  const savedClipCount = sequence?.tracks.reduce((total, track) => total + track.clips.length, 0) ?? 0;
   return <section className="editor-foundation">
-    <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project?.aspectRatio ?? '—'}</span><span>{project ? `${project.frameRate} fps` : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
+    <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project ? ratio : '—'}</span><span>{project ? frameRate : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
     <div className="editor-layout">
-      <aside className="editor-media-panel"><div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import media (not available yet)" onClick={onImportUnavailable}><Plus size={16} /></button></div><div className="media-empty"><div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Media import and metadata inspection are not implemented in this foundation build.</span><button className="button button-secondary button-small" onClick={onImportUnavailable}><Plus size={14} />Import media</button></div><div className="panel-footnote"><HardDrive size={12} />Original files are never modified</div></aside>
-      <div className="editor-center"><div className="preview-stage"><div className="preview-frame"><div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/><Film size={35} strokeWidth={1.15} /><span>Preview will appear when media is imported</span><small>Sequence {project?.aspectRatio ?? '16:9'} · {project?.frameRate ?? 30} fps</small></div></div><div className="preview-controls"><button className="transport-button" disabled title="No media loaded"><ArrowLeft size={15} /></button><button className="play-button" disabled aria-label="Play"><span /></button><button className="transport-button" disabled title="No media loaded"><ArrowRight size={15} /></button><span className="time-readout">00:00:00:00 <i>/</i> 00:00:00:00</span><span className="preview-quality">Balanced <ChevronDown size={12} /></span></div><div className="timeline-panel"><div className="timeline-heading"><div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">Sequence 01</span></div><div className="timeline-tools"><button disabled title="Split clip unavailable"><Keyboard size={14} /></button><button disabled title="Fit timeline unavailable"><LayoutPanelLeft size={14} /></button></div></div><div className="timeline-ruler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:40</span><span>00:50</span></div><div className="track-row"><span className="track-name">V1</span><div className="track-space"><div className="empty-track"><span>Add video to start editing</span><Plus size={14} /></div></div></div><div className="track-row audio-track"><span className="track-name">A1</span><div className="track-space"><div className="empty-audio"><span>Audio track</span></div></div></div><div className="timeline-note">Timeline editing, playback, and export are upcoming milestones.</div></div></div>
-      <aside className="properties-panel"><div className="panel-title">Properties</div><div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a clip in the timeline to view its properties.</span></div><div className="properties-divider"/><div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{project?.aspectRatio ?? '16:9'}</strong></div><div className="property-line"><span>Frame rate</span><strong>{project?.frameRate ?? 30} fps</strong></div><div className="property-line"><span>Resolution</span><strong>1920 × 1080</strong></div><small>Sequence settings are saved with this project entry.</small></div></aside>
+      <aside className="editor-media-panel"><div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import media (not available yet)" onClick={onImportUnavailable}><Plus size={16} /></button></div><div className="media-empty"><div className="media-icon"><Film size={20} /></div><strong>{projectDocument?.assets.length ? `${projectDocument.assets.length} media reference${projectDocument.assets.length === 1 ? '' : 's'} in project` : 'No media imported'}</strong><span>{projectDocument?.assets.length ? 'Source paths are stored in the document, but their availability has not been checked.' : 'Media import and metadata inspection are not implemented in this foundation build.'}</span><button className="button button-secondary button-small" onClick={onImportUnavailable}><Plus size={14} />Import media</button></div><div className="panel-footnote"><HardDrive size={12} />Original files are never modified</div></aside>
+      <div className="editor-center"><div className="preview-stage"><div className="preview-frame"><div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/><Film size={35} strokeWidth={1.15} /><span>{projectDocument?.assets.length ? 'Media references loaded · preview decoding is not implemented' : 'Preview appears after media import becomes available'}</span><small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small></div></div><div className="preview-controls"><button className="transport-button" disabled title="No media loaded"><ArrowLeft size={15} /></button><button className="play-button" disabled aria-label="Play"><span /></button><button className="transport-button" disabled title="No media loaded"><ArrowRight size={15} /></button><span className="time-readout">00:00:00:00 <i>/</i> 00:00:00:00</span><span className="preview-quality">Balanced <ChevronDown size={12} /></span></div><div className="timeline-panel"><div className="timeline-heading"><div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div><div className="timeline-tools"><button disabled title="Split clip unavailable"><Keyboard size={14} /></button><button disabled title="Fit timeline unavailable"><LayoutPanelLeft size={14} /></button></div></div><div className="timeline-ruler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:40</span><span>00:50</span></div><div className="track-row"><span className="track-name">V1</span><div className="track-space"><div className="empty-track"><span>Add video to start editing</span><Plus size={14} /></div></div></div><div className="track-row audio-track"><span className="track-name">A1</span><div className="track-space"><div className="empty-audio"><span>Audio track</span></div></div></div><div className="timeline-note">{savedClipCount ? `This project document contains ${savedClipCount} clip entries; timeline rendering and editing are not implemented.` : 'Timeline editing, playback, and export are upcoming milestones.'}</div></div></div>
+      <aside className="properties-panel"><div className="panel-title">Properties</div><div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a clip in the timeline to view its properties.</span></div><div className="properties-divider"/><div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><small>Settings are loaded from the validated project document.</small></div></aside>
     </div>
     <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>
   </section>;
@@ -396,7 +458,7 @@ function ClippingFoundation({ onCreate }: { onCreate: () => void }) {
 }
 
 function SettingsDialog({ theme, onTheme, onClose }: { theme: 'dark' | 'light'; onTheme: (value: 'dark' | 'light') => void; onClose: () => void }) {
-  return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="dialog-head"><div className="dialog-icon"><Settings2 size={17} /></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">Settings</h2><p className="dialog-copy">Adjust this workspace. Preferences are saved on this device.</p><div className="setting-row"><div><strong>Appearance</strong><span>Choose a theme for the studio.</span></div><div className="theme-toggle"><button className={theme === 'dark' ? 'active' : ''} onClick={() => onTheme('dark')}><Moon size={14} />Dark</button><button className={theme === 'light' ? 'active' : ''} onClick={() => onTheme('light')}><Sun size={14} />Light</button></div></div><div className="setting-row"><div><strong>Storage model</strong><span>Project-list metadata in browser local storage</span></div><span className="setting-value">Local</span></div><div className="setting-row"><div><strong>Application version</strong><span>Foundation build · 0.1.0</span></div><span className="setting-value">Early access</span></div><div className="settings-disclaimer">A Windows desktop shell, managed project files, autosave, and recovery are not included in this first increment.</div><div className="dialog-actions"><button className="button button-primary" onClick={onClose}>Done</button></div></section></div>;
+  return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="dialog-head"><div className="dialog-icon"><Settings2 size={17} /></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">Settings</h2><p className="dialog-copy">Adjust this workspace. Preferences are saved on this device.</p><div className="setting-row"><div><strong>Appearance</strong><span>Choose a theme for the studio.</span></div><div className="theme-toggle"><button className={theme === 'dark' ? 'active' : ''} onClick={() => onTheme('dark')}><Moon size={14} />Dark</button><button className={theme === 'light' ? 'active' : ''} onClick={() => onTheme('light')}><Sun size={14} />Light</button></div></div><div className="setting-row"><div><strong>Storage model</strong><span>Project index and documents in browser local storage</span></div><span className="setting-value">Local</span></div><div className="setting-row"><div><strong>Application version</strong><span>Foundation build · 0.1.0</span></div><span className="setting-value">Early access</span></div><div className="settings-disclaimer">A Windows desktop shell, managed project files, autosave, and recovery are not included in this first increment.</div><div className="dialog-actions"><button className="button button-primary" onClick={onClose}>Done</button></div></section></div>;
 }
 
 type CommandAction = { label: string; shortcut?: string; icon: LucideIcon; run: () => void };
