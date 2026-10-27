@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, ArrowLeft, ArrowRight, Check, ChevronDown, Download,
+  Archive, ArrowLeft, ArrowRight, Check, ChevronDown, ChevronLeft, ChevronRight, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, ListFilter, Maximize2,
-  MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut,
+  MoreHorizontal, Minimize2, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut,
   X, type LucideIcon,
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
@@ -42,25 +42,20 @@ type SessionMediaSource = { url: string; name: string };
 type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
 const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
-const TIMELINE_HEIGHT_EXPANDED_KEY = 'clipwright.workspace.timeline-height-expanded-v1';
+const TIMELINE_LAYOUT_VERSION_KEY = 'clipwright.workspace.timeline-layout-v2';
 const TIMELINE_ZOOM_KEY = 'clipwright.workspace.timeline-zoom';
-const TIMELINE_MIN_HEIGHT = 180;
-const TIMELINE_MAX_HEIGHT = 720;
-const TIMELINE_DEFAULT_HEIGHT = TIMELINE_MAX_HEIGHT;
+const TIMELINE_RESIZE_HANDLE_HEIGHT = 6;
+const TIMELINE_MIN_PANEL_HEIGHT = 150;
 
 function readTimelineHeight() {
   try {
-    const rawValue = window.localStorage.getItem(TIMELINE_HEIGHT_KEY);
-    const value = Number(rawValue);
-    const isValid = Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT;
-    if (window.localStorage.getItem(TIMELINE_HEIGHT_EXPANDED_KEY) !== 'true') {
-      const expandedHeight = Math.max(isValid ? value : 0, TIMELINE_DEFAULT_HEIGHT);
-      window.localStorage.setItem(TIMELINE_HEIGHT_KEY, String(expandedHeight));
-      window.localStorage.setItem(TIMELINE_HEIGHT_EXPANDED_KEY, 'true');
-      return expandedHeight;
+    if (window.localStorage.getItem(TIMELINE_LAYOUT_VERSION_KEY) !== 'true') {
+      window.localStorage.setItem(TIMELINE_LAYOUT_VERSION_KEY, 'true');
+      return 0;
     }
-    return isValid ? value : TIMELINE_DEFAULT_HEIGHT;
-  } catch { return TIMELINE_DEFAULT_HEIGHT; }
+    const value = Number(window.localStorage.getItem(TIMELINE_HEIGHT_KEY));
+    return Number.isFinite(value) && value >= TIMELINE_MIN_PANEL_HEIGHT ? value : 0;
+  } catch { return 0; }
 }
 
 function storeTimelineHeight(value: number) {
@@ -108,6 +103,8 @@ function formatSourceSeconds(ticks: number, timeBase: { numerator: number; denom
 
 export default function App() {
   const [workspace, setWorkspace] = useState<Workspace>('home');
+  const [editorNavCollapsed, setEditorNavCollapsed] = useState(true);
+  const [editorFocusMode, setEditorFocusMode] = useState(false);
   const [initialProjectStore] = useState(() => readProjectStore(window.localStorage));
   const [projects, setProjects] = useState<Project[]>(initialProjectStore.projects);
   const [storageWarning, setStorageWarning] = useState(initialProjectStore.issue);
@@ -144,6 +141,10 @@ export default function App() {
   const videoFileInputRef = useRef<HTMLInputElement>(null);
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
+  const activeProjectDocument = documents.find((document) => document.id === activeProjectId) ?? null;
+  const activeSequence = activeProjectDocument?.sequences.find((item) => item.id === activeProjectDocument.projectSettings.defaultSequenceId) ?? null;
+  const editorAspectRatio = activeSequence ? aspectRatioOf(activeSequence.width, activeSequence.height) : activeProject?.aspectRatio ?? '16:9';
+  const editorFrameRate = activeSequence ? formatFrameRate(activeSequence.frameRate.numerator / activeSequence.frameRate.denominator) : formatFrameRate(activeProject?.frameRate ?? 30);
   const persistenceWarning = storageWarning ?? documentStorageWarning;
   const visibleProjects = useMemo(() => projects
     .filter((project) => project.archived === showArchived)
@@ -188,6 +189,7 @@ export default function App() {
       }
       if (event.key === 'Escape') {
         setShowCreate(false); setShowSettings(false); setShowCommands(false); setShowTasks(false);
+        setEditorFocusMode(false);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -571,13 +573,16 @@ export default function App() {
 
   const navigate = (next: Workspace) => {
     setWorkspace(next);
-    if (next !== 'editor') setActiveProjectId(null);
+    if (next !== 'editor') {
+      setActiveProjectId(null);
+      setEditorFocusMode(false);
+    }
   };
 
   const pageTitle = workspace === 'home' ? 'Projects' : workspace === 'clipping' ? 'AI Clipping' : activeProject?.name ?? 'Editor';
 
   return (
-    <div className="app-shell" data-testid="app-shell">
+    <div className={`app-shell ${workspace === 'editor' ? 'is-editor' : ''} ${workspace === 'editor' && editorNavCollapsed ? 'is-editor-nav-collapsed' : ''} ${editorFocusMode ? 'is-editor-focus' : ''}`} data-testid="app-shell">
       <aside className="rail">
         <button className="brand-lockup" onClick={() => navigate('home')} aria-label="ClipWright Studio home" title="ClipWright Studio">
           <img src="/assets/clipwright-icon.png" alt="" />
@@ -585,36 +590,46 @@ export default function App() {
         <div className="rail-divider" />
         <nav className="primary-nav" aria-label="Primary navigation">
           {workspaceItems.map(({ id, label, icon: Icon }) => (
-            <button key={id} className={`nav-item ${workspace === id ? 'is-active' : ''}`} onClick={() => navigate(id)} aria-current={workspace === id ? 'page' : undefined}>
+            <button key={id} className={`nav-item ${workspace === id ? 'is-active' : ''}`} onClick={() => navigate(id)} aria-current={workspace === id ? 'page' : undefined} aria-label={label} title={label}>
               <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
             </button>
           ))}
         </nav>
         <div className="rail-spacer" />
         <div className="rail-bottom">
-          <button className="nav-item subtle" onClick={() => setShowTasks(true)}><Clock3 size={18} /><span>Tasks</span></button>
-          <button className="nav-item subtle" onClick={() => setShowSettings(true)}><Settings2 size={18} /><span>Settings</span></button>
+          <button className="nav-item subtle" onClick={() => setShowTasks(true)} aria-label="Tasks" title="Tasks"><Clock3 size={18} /><span>Tasks</span></button>
+          <button className="nav-item subtle" onClick={() => setShowSettings(true)} aria-label="Settings" title="Settings"><Settings2 size={18} /><span>Settings</span></button>
           <div className="local-badge"><span className="status-dot" />Local workspace</div>
         </div>
       </aside>
 
       <div className="main-column">
-        <header className="topbar">
-          <div className="brand-title"><span className="wordmark">ClipWright</span><span className="brand-studio">STUDIO</span><span className="version-tag">EARLY ACCESS</span></div>
+        <header className={`topbar ${workspace === 'editor' ? 'topbar-editor' : ''}`}>
+          {workspace === 'editor' ? <div className="editor-topbar-leading">
+            <button className="icon-button editor-nav-toggle" type="button" aria-label={editorNavCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={editorNavCollapsed ? 'Expand navigation' : 'Collapse navigation'} aria-expanded={!editorNavCollapsed} onClick={() => setEditorNavCollapsed((collapsed) => !collapsed)}>{editorNavCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}</button>
+            <div className="brand-title"><span className="wordmark">ClipWright</span><span className="brand-studio">STUDIO</span></div>
+            <span className="topbar-separator" aria-hidden="true" />
+            <button className="editor-back-button" type="button" onClick={() => navigate('home')} aria-label="Back to projects" title="Back to projects"><ArrowLeft size={17} /></button>
+            <h1 className="editor-topbar-project" title={activeProject?.name ?? 'Editor'}>{activeProject?.name ?? 'Editor'}</h1>
+            <div className="editor-meta-badges" aria-label="Project settings and save status">
+              <span>{editorAspectRatio}</span><span>{editorFrameRate}</span><span className="editor-saved"><Check size={12} />Saved</span>
+            </div>
+          </div> : <div className="brand-title"><span className="wordmark">ClipWright</span><span className="brand-studio">STUDIO</span><span className="version-tag">EARLY ACCESS</span></div>}
           <div className="topbar-actions">
             {workspace === 'home' && <div className="top-search"><Search size={15} /><input aria-label="Search projects" placeholder="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>⌘ K</kbd></div>}
+            {workspace === 'editor' && <button className="icon-button focus-mode-toggle" type="button" aria-label="Enter focus mode" title="Focus mode — hide navigation and header" onClick={() => setEditorFocusMode(true)}><Maximize2 size={18} /></button>}
             <button className="icon-button" aria-label="Open command palette" title="Command palette (Ctrl+K)" onClick={() => setShowCommands(true)}><Command size={17} /></button>
             <button className="icon-button task-button" aria-label="Task centre" title="Task centre" onClick={() => setShowTasks(true)}><Clock3 size={17} /></button>
             <button className="icon-button" aria-label="Help and project status" title="Project status and help" onClick={() => notify('This foundation build runs locally; editing and AI services are not connected yet.', 'error')}><CircleHelp size={17} /></button>
           </div>
         </header>
-        <div className="workspace-head">
+        {workspace !== 'editor' && <div className="workspace-head">
           <div className="breadcrumb">
             {workspace !== 'home' && <button className="back-button" onClick={() => navigate('home')} aria-label="Back to projects"><ArrowLeft size={16} /></button>}
             <span className="crumb-muted">Workspace</span><span className="crumb-slash">/</span><strong>{pageTitle}</strong>
           </div>
           <div className="head-status"><span className={`status-dot ${persistenceWarning ? 'status-warning' : ''}`} />{persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'}</div>
-        </div>
+        </div>}
 
         <main className={`content-area ${workspace === 'editor' ? 'content-area-editor' : ''}`}>
           {workspace === 'home' && (
@@ -656,11 +671,12 @@ export default function App() {
 
           {workspace === 'editor' && <EditorFoundation
             project={activeProject}
-            projectDocument={documents.find((document) => document.id === activeProjectId) ?? null}
+            projectDocument={activeProjectDocument}
             sessionSources={sessionSources}
             selectedMediaKey={selectedMediaKey}
             isReadingMedia={isReadingMedia}
-            onBack={() => navigate('home')}
+            focusMode={editorFocusMode}
+            onToggleFocusMode={() => setEditorFocusMode((focus) => !focus)}
             onImportVideo={() => requestVideoImport()}
             onRelinkVideo={(assetId) => requestVideoImport(assetId)}
             onSelectMedia={setSelectedMediaKey}
@@ -747,7 +763,8 @@ function EditorFoundation({
   sessionSources,
   selectedMediaKey,
   isReadingMedia,
-  onBack,
+  focusMode,
+  onToggleFocusMode,
   onImportVideo,
   onRelinkVideo,
   onSelectMedia,
@@ -766,7 +783,8 @@ function EditorFoundation({
   sessionSources: Record<string, SessionMediaSource>;
   selectedMediaKey: string | null;
   isReadingMedia: boolean;
-  onBack: () => void;
+  focusMode: boolean;
+  onToggleFocusMode: () => void;
   onImportVideo: () => void;
   onRelinkVideo: (assetId: string) => void;
   onSelectMedia: (key: string) => void;
@@ -796,6 +814,7 @@ function EditorFoundation({
   const timelineTrackRowTemplate = `repeat(${Math.max(1, videoTracks.length + audioTracks.length)}, minmax(64px, 1fr))`;
   const videoClips = videoTracks.flatMap((track) => track.clips.filter((clip): clip is VideoClip => clip.kind === 'video'));
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
+  const [mediaPanelCollapsed, setMediaPanelCollapsed] = useState(false);
   const [timelinePlayheadFrame, setTimelinePlayheadFrame] = useState(0);
   const [timelineSyncClipId, setTimelineSyncClipId] = useState<string | null>(null);
   const pendingPreviewSeekRef = useRef<{ assetId: string; url: string | null; seconds: number } | null>(null);
@@ -810,7 +829,7 @@ function EditorFoundation({
   const timelinePlayheadRef = useRef<HTMLDivElement>(null);
   const playheadPointerRef = useRef<number | null>(null);
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
-  const timelineHeightRef = useRef(280);
+  const timelineHeightRef = useRef(0);
   const [editorLayoutSize, setEditorLayoutSize] = useState({ width: 0, height: 0 });
   const [timelineHeight, setTimelineHeight] = useState(readTimelineHeight);
   const [timelineZoom, setTimelineZoom] = useState(readTimelineZoom);
@@ -826,8 +845,15 @@ function EditorFoundation({
   const tickSeconds = niceRulerIntervalSeconds(80 / Math.max(0.001, timelinePixelsPerFrame * frameRateValue));
   const tickInterval = Math.max(1, Math.round(frameRateValue * tickSeconds));
   const timelineTicks = Array.from({ length: Math.min(2_000, Math.floor(timelineCanvasFrames / tickInterval) + 1) }, (_, index) => index * tickInterval);
-  const timelineMaxHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(TIMELINE_MAX_HEIGHT, Math.floor((editorLayoutSize.height || 600) * 0.7), (editorLayoutSize.height || 600) - 246));
-  const effectiveTimelineHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineHeight, timelineMaxHeight));
+  const editorAvailableHeight = editorLayoutSize.height || Math.max(360, window.innerHeight - (focusMode ? 0 : 62));
+  const previewMinHeight = Math.floor(editorAvailableHeight * 0.3);
+  const previewMaxHeight = Math.floor(editorAvailableHeight * 0.75);
+  const timelineMinHeight = Math.max(TIMELINE_MIN_PANEL_HEIGHT, Math.ceil(editorAvailableHeight - previewMaxHeight - TIMELINE_RESIZE_HANDLE_HEIGHT));
+  const timelineMaxHeight = Math.max(timelineMinHeight, Math.floor(editorAvailableHeight - previewMinHeight - TIMELINE_RESIZE_HANDLE_HEIGHT));
+  const defaultTimelineHeight = Math.round(editorAvailableHeight * 0.4);
+  const effectiveTimelineHeight = Math.max(timelineMinHeight, Math.min(timelineHeight || defaultTimelineHeight, timelineMaxHeight));
+  const previewHeight = Math.max(0, editorAvailableHeight - effectiveTimelineHeight - TIMELINE_RESIZE_HANDLE_HEIGHT);
+  const previewHeightPercent = Math.round(previewHeight / Math.max(1, editorAvailableHeight) * 100);
   const [startFrameDraft, setStartFrameDraft] = useState('0');
   const [sourceInDraft, setSourceInDraft] = useState('0');
   const [sourceOutDraft, setSourceOutDraft] = useState('0');
@@ -1101,7 +1127,7 @@ function EditorFoundation({
   }
 
   function setWorkspaceTimelineHeight(nextHeight: number) {
-    const next = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineMaxHeight, Math.round(nextHeight)));
+    const next = Math.max(timelineMinHeight, Math.min(timelineMaxHeight, Math.round(nextHeight)));
     timelineHeightRef.current = next;
     setTimelineHeight(next);
     storeTimelineHeight(next);
@@ -1116,7 +1142,7 @@ function EditorFoundation({
 
   function moveTimelineResize(event: React.PointerEvent<HTMLDivElement>) {
     if (!resizeStartRef.current) return;
-    const next = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineMaxHeight, resizeStartRef.current.height + resizeStartRef.current.y - event.clientY));
+    const next = Math.max(timelineMinHeight, Math.min(timelineMaxHeight, resizeStartRef.current.height + resizeStartRef.current.y - event.clientY));
     timelineHeightRef.current = next;
     setTimelineHeight(next);
   }
@@ -1132,7 +1158,7 @@ function EditorFoundation({
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Home' || event.key === 'End') {
       event.preventDefault();
       const delta = event.key === 'ArrowUp' ? 16 : event.key === 'ArrowDown' ? -16 : 0;
-      setWorkspaceTimelineHeight(event.key === 'Home' ? TIMELINE_MIN_HEIGHT : event.key === 'End' ? timelineMaxHeight : effectiveTimelineHeight + delta);
+      setWorkspaceTimelineHeight(event.key === 'Home' ? timelineMinHeight : event.key === 'End' ? timelineMaxHeight : effectiveTimelineHeight + delta);
     }
   }
 
@@ -1162,29 +1188,36 @@ function EditorFoundation({
   }
 
   return <section className="editor-foundation">
-    <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project ? ratio : '—'}</span><span>{project ? frameRate : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
     <div className="editor-layout" ref={editorLayoutRef}>
-      <div className="editor-main-row">
-        <aside className="editor-media-panel" aria-label="Project media">
-          <div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button></div>
-          {assets.length ? <div className="media-asset-list" aria-label="Media assets">
-            {assets.map((asset) => {
-              const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
-              const available = Boolean(sessionSources[key]);
-              const isVideo = asset.kind === 'video' && Boolean(asset.streams.video);
-              return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
-                <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && selectMediaSource(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
-                  <Film size={15} /><span className="media-asset-copy"><strong>{asset.name}</strong><small>{isVideo ? (available ? 'Ready in this session' : 'Relink required') : `${asset.kind} preview not supported`}</small></span>
-                </button>
-                {isVideo && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
-              </div>;
-            })}
-            <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
-          </div> : <div className="media-empty">
-            <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose a local video to read browser-reported metadata and preview supported formats.</span><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button>
-          </div>}
-          {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
-          <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
+      <div className={`editor-main-row${mediaPanelCollapsed ? ' media-panel-collapsed' : ''}`}>
+        <aside className={`editor-media-panel${mediaPanelCollapsed ? ' is-collapsed' : ''}`} aria-label="Project media">
+          <div className="panel-title">
+            {!mediaPanelCollapsed && <span>Project media</span>}
+            <div className="panel-title-tools">
+              <button className="icon-button small" type="button" title={mediaPanelCollapsed ? 'Expand media panel' : 'Collapse media panel'} aria-label={mediaPanelCollapsed ? 'Expand media panel' : 'Collapse media panel'} aria-expanded={!mediaPanelCollapsed} onClick={() => setMediaPanelCollapsed((collapsed) => !collapsed)}>{mediaPanelCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}</button>
+              {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button>}
+            </div>
+          </div>
+          {!mediaPanelCollapsed && <>
+            {assets.length ? <div className="media-asset-list" aria-label="Media assets">
+              {assets.map((asset) => {
+                const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
+                const available = Boolean(sessionSources[key]);
+                const isVideo = asset.kind === 'video' && Boolean(asset.streams.video);
+                return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
+                  <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && selectMediaSource(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
+                    <Film size={15} /><span className="media-asset-copy"><strong>{asset.name}</strong><small>{isVideo ? (available ? 'Ready in this session' : 'Relink required') : `${asset.kind} preview not supported`}</small></span>
+                  </button>
+                  {isVideo && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
+                </div>;
+              })}
+              <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
+            </div> : <div className="media-empty">
+              <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose a local video to read browser-reported metadata and preview supported formats.</span><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button>
+            </div>}
+            {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
+            <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
+          </>}
         </aside>
         <div className="editor-center">
           <div className="preview-stage"><div className="preview-frame">
@@ -1249,12 +1282,12 @@ function EditorFoundation({
       <div
         className="timeline-resize-handle"
         role="separator"
-        aria-label="Resize timeline height"
+        aria-label="Resize preview and timeline"
         aria-orientation="horizontal"
-        aria-valuemin={TIMELINE_MIN_HEIGHT}
+        aria-valuemin={timelineMinHeight}
         aria-valuemax={timelineMaxHeight}
         aria-valuenow={effectiveTimelineHeight}
-        aria-valuetext={`${effectiveTimelineHeight} pixels`}
+        aria-valuetext={`${previewHeightPercent}% preview height`}
         tabIndex={0}
         onPointerDown={beginTimelineResize}
         onPointerMove={moveTimelineResize}
@@ -1270,6 +1303,7 @@ function EditorFoundation({
             <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
             <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
             <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
+            {focusMode && <button className="focus-mode-inline" type="button" aria-label="Exit focus mode" title="Exit focus mode (Esc)" onClick={onToggleFocusMode}><Minimize2 size={20} /></button>}
             <div className="timeline-zoom" role="group" aria-label="Timeline zoom controls">
               <button type="button" aria-label="Zoom timeline out" title="Zoom timeline out" disabled={timelineZoom <= 0.25} onClick={() => zoomTimeline(timelineZoom / 1.25)}><ZoomOut size={14} /></button>
               <input aria-label="Timeline zoom level" type="range" min="0.25" max="4" step="0.05" value={timelineZoom} onChange={(event) => zoomTimeline(Number(event.target.value))} />
@@ -1355,7 +1389,6 @@ function EditorFoundation({
         </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
       </div>
     </div>
-    <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>
   </section>;
 }
 

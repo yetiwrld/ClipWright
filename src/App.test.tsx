@@ -23,7 +23,7 @@ describe('ClipWright foundation UI', () => {
     fireEvent.change(screen.getByLabelText('Aspect ratio'), { target: { value: '9:16' } });
     fireEvent.click(screen.getByRole('button', { name: /create project/i }));
 
-    expect(await screen.findByRole('heading', { name: 'Interview cut' })).toBeTruthy();
+    expect(await screen.findByText('Interview cut')).toBeTruthy();
     await waitFor(() => expect(window.localStorage.getItem(PROJECTS_KEY)).toContain('Interview cut'));
     expect(window.localStorage.getItem(PROJECTS_KEY)).toContain('9:16');
     await waitFor(() => expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).toContain('"schemaVersion":1'));
@@ -49,8 +49,17 @@ describe('ClipWright foundation UI', () => {
     expect(propertiesBody?.parentElement).toBe(container.querySelector('.properties-panel'));
     expect(propertiesBody?.previousElementSibling?.textContent).toBe('Properties');
     expect(container.querySelector('.timeline-panel')?.parentElement).toBe(container.querySelector('.editor-layout'));
-    expect(Number(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow'))).toBeGreaterThanOrEqual(350);
-    expect(window.localStorage.getItem('clipwright.workspace.timeline-height-expanded-v1')).toBe('true');
+    const timelineResizer = screen.getByRole('separator', { name: 'Resize preview and timeline' });
+    const initialPreviewPercent = Number(timelineResizer.getAttribute('aria-valuetext')?.match(/\d+/)?.[0]);
+    expect(initialPreviewPercent).toBeGreaterThanOrEqual(58);
+    expect(initialPreviewPercent).toBeLessThanOrEqual(62);
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-layout-v2')).toBe('true');
+    expect(container.querySelector('.editor-project-bar')).toBeNull();
+    expect(container.querySelector('.workspace-head')).toBeNull();
+    expect(container.querySelector('.subtle-back')).toBeNull();
+    expect(container.querySelector('.editor-meta-badges')?.textContent).toContain('9:16');
+    expect(container.querySelector('.editor-meta-badges')?.textContent).toContain('30 fps');
+    expect(container.querySelector('.editor-meta-badges')?.textContent).toContain('Saved');
     expect(container.querySelectorAll('.timeline-note')).toHaveLength(0);
     expect([...container.querySelectorAll('.timeline-track-layout > *')].map((element) => element.className)).toEqual([
       'timeline-track-header-column',
@@ -60,7 +69,6 @@ describe('ClipWright foundation UI', () => {
     const trackHeaders = container.querySelector('.timeline-track-header-rows') as HTMLDivElement;
     fireEvent.scroll(timelineScroller, { target: { scrollTop: 42, scrollLeft: 50 } });
     expect(trackHeaders.style.transform).toBe('translateY(-42px)');
-    const timelineResizer = screen.getByRole('separator', { name: 'Resize timeline height' });
     const startingTimelineHeight = Number(timelineResizer.getAttribute('aria-valuenow'));
     fireEvent.keyDown(timelineResizer, { key: 'ArrowDown' });
     expect(Number(timelineResizer.getAttribute('aria-valuenow'))).toBe(startingTimelineHeight - 16);
@@ -71,6 +79,22 @@ describe('ClipWright foundation UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fit project in timeline' }));
     expect(screen.getByText('100%')).toBeTruthy();
     expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('1');
+
+    const shell = container.querySelector('.app-shell') as HTMLDivElement;
+    expect(shell.classList.contains('is-editor-nav-collapsed')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse media panel' }));
+    expect(container.querySelector('.editor-main-row')?.classList.contains('media-panel-collapsed')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Expand media panel' }));
+    expect(container.querySelector('.editor-main-row')?.classList.contains('media-panel-collapsed')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Expand navigation' }));
+    expect(shell.classList.contains('is-editor-nav-collapsed')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse navigation' }));
+    expect(shell.classList.contains('is-editor-nav-collapsed')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Enter focus mode' }));
+    expect(shell.classList.contains('is-editor-focus')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Exit focus mode' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Exit focus mode' }));
+    expect(shell.classList.contains('is-editor-focus')).toBe(false);
   });
 
   it('shows preserved audio clips as dimmed, non-editable items with their full-name tooltip', async () => {
@@ -281,7 +305,7 @@ describe('ClipWright foundation UI', () => {
     expect(input).toBeTruthy();
     fireEvent.change(input!, { target: { files: [file] } });
 
-    expect(await screen.findByRole('heading', { name: 'Imported interview' })).toBeTruthy();
+    expect(await screen.findByText('Imported interview')).toBeTruthy();
     expect(screen.getAllByText('4:3')).toHaveLength(2);
     expect(screen.getAllByText('29.97 fps')).toHaveLength(2);
     const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
@@ -312,7 +336,7 @@ describe('ClipWright foundation UI', () => {
     const { container } = render(<App />);
     fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
 
-    expect(await screen.findByRole('heading', { name: 'Imported copy' })).toBeTruthy();
+    expect(await screen.findByText('Imported copy')).toBeTruthy();
     expect(screen.getByText(/separate project copy/i)).toBeTruthy();
     const savedProjects = JSON.parse(window.localStorage.getItem(PROJECTS_KEY) ?? '[]');
     const savedDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
