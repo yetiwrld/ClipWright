@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe('ClipWright foundation UI', () => {
   it('creates and persists a project before opening the editor workspace', async () => {
-    render(<App />);
+    const { container } = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
     fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Interview cut' } });
     fireEvent.change(screen.getByLabelText('Aspect ratio'), { target: { value: '9:16' } });
@@ -29,6 +29,12 @@ describe('ClipWright foundation UI', () => {
     const savedDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
     expect(savedDocuments[0].sequences[0].tracks).toHaveLength(2);
     expect(screen.getByText(/choose a local video to read browser-reported metadata/i)).toBeTruthy();
+    expect([...container.querySelectorAll('.editor-layout > *')].map((element) => element.className)).toEqual([
+      'timeline-panel',
+      'editor-media-panel',
+      'editor-center',
+      'properties-panel',
+    ]);
   });
 
   it('imports, previews, relinks, and edits a browser-session video on the timeline', async () => {
