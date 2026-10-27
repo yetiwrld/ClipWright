@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createProject } from './projects';
 import { createProjectDocument, serializeProjectDocument } from './projectDocument';
-import { appendVideoClip, moveVideoClip, removeVideoClip, sequenceDurationInFrames } from './timelineOperations';
+import { appendVideoClip, moveVideoClip, removeVideoClip, sequenceDurationInFrames, trimVideoClip } from './timelineOperations';
 
 function makeDocument() {
   const document = createProjectDocument(createProject('Timeline operations', '16:9', 30));
@@ -52,6 +52,22 @@ describe('frame-based timeline operations', () => {
     expect(primaryVideoTrack(updated).clips[0]).toMatchObject({ timelineStartFrame: 0, timelineDurationFrames: 370 });
     expect(updated.sequences[0].durationFrames).toBe(370);
     expect(() => serializeProjectDocument(updated)).not.toThrow();
+  });
+
+  it('trims source tick ranges, rounds their duration to sequence frames, and rejects invalid or overlapping ranges', () => {
+    const document = makeDocument();
+    const first = appendVideoClip(document, document.sequences[0].id, 'asset-video', 'clip-one');
+    const trimmed = trimVideoClip(first, first.sequences[0].id, 'clip-one', 1_000, 9_000);
+    expect(primaryVideoTrack(trimmed).clips[0]).toMatchObject({ sourceInTick: 1_000, sourceOutTick: 9_000, timelineDurationFrames: 240 });
+    expect(trimmed.sequences[0].durationFrames).toBe(240);
+    expect(() => serializeProjectDocument(trimmed)).not.toThrow();
+    expect(() => trimVideoClip(trimmed, trimmed.sequences[0].id, 'clip-one', 9_000, 9_000)).toThrow('non-empty range');
+    expect(() => trimVideoClip(trimmed, trimmed.sequences[0].id, 'clip-one', 0, 10_001)).toThrow('non-empty range');
+
+    const second = appendVideoClip(first, first.sequences[0].id, 'asset-video', 'clip-two');
+    const shortened = trimVideoClip(second, second.sequences[0].id, 'clip-one', 0, 4_000);
+    const moved = moveVideoClip(shortened, shortened.sequences[0].id, 'clip-two', 120);
+    expect(() => trimVideoClip(moved, moved.sequences[0].id, 'clip-one', 0, 5_000)).toThrow('overlap another video clip');
   });
 
   it('moves clips only to non-overlapping safe frame positions and removes clips cleanly', () => {

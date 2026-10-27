@@ -17,7 +17,7 @@
 | Project schema | Missing | Version-1 validated project document with integer frame/sample positions, rational timebases, media/track/clip contracts, and legacy-entry migration |
 | Project persistence | Missing | Browser localStorage index/document stores, validated `.cwproject` open/import and download; no managed filesystem, atomic save, autosave, or crash recovery |
 | Media ingestion / metadata | Missing | Browser file picker for video; reads browser-reported duration/dimensions; project metadata stores only filename, size, and session reference; relink required after reload |
-| Preview / timeline / edits | Missing | In-session source preview via browser `<video>`; basic video clip append, integer-frame reposition without same-track overlap, removal, and document persistence; no timeline playback, trim, undo/redo, audio-lane editing, or rendering |
+| Preview / timeline / edits | Missing | In-session source preview; video clip append, integer-frame reposition with overlap protection, source-tick trimming, removal, and document persistence; sequence undo/redo is in-memory; no timeline playback or audio editing |
 | FFmpeg / rendering | Missing | No FFmpeg dependency or render implementation |
 | Transcription / AI | Missing | No models/providers; AI clipping screen explains the limitation |
 | Tests | Missing | Vitest model/persistence unit tests |
@@ -27,7 +27,7 @@
 ## Baseline and current verification
 
 - Baseline build/test: not applicable; no package manifest or application existed.
-- Latest local checks on 2026-10-27 (Node 22.22.3): `npm test` passed (28 tests across 5 files); `npm run build` passed (strict TypeScript check and Vite production bundle); `npm audit --audit-level=moderate` reported 0 vulnerabilities; `git diff --check` passed.
+- Latest local checks on 2026-10-27 (Node 22.22.3): `npm test` passed (29 tests across 5 files); `npm run build` passed (strict TypeScript check and Vite production bundle); `npm audit --audit-level=moderate` reported 0 vulnerabilities; `git diff --check` passed.
 - CI run `40584129896` passed install, tests, and build on commit `db95a35`. The Vite dev server served HTTP 200 on port 5173.
 - Browser metadata and UI behavior are tested with mocked media-element events. There is no real media fixture or browser binary in the container, so actual codec playback and visual browser QA remain unverified. No Windows build or export has been verified.
 

@@ -173,6 +173,11 @@ h1, h2, h3, p { margin-top: 0; }
 .frame-position-form label { display: block; margin-bottom: 6px; color: var(--text-muted); font-size: 9px; }
 .frame-position-form > div { display: flex; align-items: center; gap: 6px; }
 .frame-position-form input { min-width: 0; width: 100%; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); background: var(--bg-input); font-size: 10px; font-variant-numeric: tabular-nums; }
+.source-trim-form { display: grid; gap: 8px; margin-top: 14px; }
+.source-trim-form > div { display: flex; flex-direction: column; gap: 5px; }
+.source-trim-form label { color: var(--text-muted); font-size: 9px; }
+.source-trim-form input { width: 100%; height: 29px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); background: var(--bg-input); font-size: 10px; font-variant-numeric: tabular-nums; }
+.source-trim-form button { justify-self: start; }
 .selected-clip-properties > small { display: block; margin-top: 12px; color: var(--text-muted); font-size: 8px; line-height: 1.5; }
 .properties-empty { min-height: 202px; display: flex; justify-content: center; align-items: center; flex-direction: column; gap: 8px; padding: 20px; color: var(--text-muted); text-align: center; }.properties-empty strong { color: var(--text-secondary); font-size: 10px; font-weight: 520; }.properties-empty span { font-size: 9px; line-height: 1.55; }
 .properties-divider { height: 1px; background: var(--border-soft); }.property-section { padding: 15px 13px; }.property-section > .panel-kicker { display: block; margin-bottom: 14px; }.property-line { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border-soft); color: var(--text-muted); font-size: 9px; }.property-line strong { color: var(--text-secondary); font-weight: 500; }.property-section > small { display: block; padding-top: 11px; color: var(--text-muted); font-size: 8px; line-height: 1.5; }
@@ -201,7 +206,11 @@ h1, h2, h3, p { margin-top: 0; }
   .properties-panel { display: none; }
   .clipping-view { padding: 38px 28px 22px; }
 }
-@media (max-width: 1020px) { .preview-quality { display: none; } }
+@media (max-width: 1020px) {
+  .preview-quality { display: none; }
+  .timeline-heading { height: auto; min-height: 39px; align-items: flex-start; flex-wrap: wrap; row-gap: 6px; padding: 5px 0; }
+  .timeline-tools { max-width: 100%; flex-wrap: wrap; }
+}
 @media (max-width: 720px) {
   .preview-controls { gap: 5px; padding: 0 6px; }
   .preview-seek { flex-basis: 42px; }

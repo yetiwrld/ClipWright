@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive, ArrowLeft, ArrowRight, Check, ChevronDown, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
-  Pause, Play, SkipBack, SkipForward, Volume2, VolumeX,
+  Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, LayoutPanelLeft, ListFilter,
   MoreHorizontal, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload,
   X, type LucideIcon,
@@ -10,9 +10,9 @@ import {
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
-import type { MediaAsset, ProjectDocument, StreamInfo, VideoClip } from './lib/projectDocument';
+import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, VideoClip } from './lib/projectDocument';
 import { probeBrowserVideo } from './lib/browserMedia';
-import { appendVideoClip, moveVideoClip, removeVideoClip, sequenceDurationInFrames } from './lib/timelineOperations';
+import { appendVideoClip, moveVideoClip, removeVideoClip, sequenceDurationInFrames, trimVideoClip } from './lib/timelineOperations';
 
 type Workspace = 'home' | 'clipping' | 'editor';
 type Toast = { id: number; message: string; kind?: 'error' | 'success' };
@@ -39,6 +39,7 @@ function aspectRatioOf(width: number, height: number) {
 }
 
 type SessionMediaSource = { url: string; name: string };
+type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
 
 function formatPlaybackTime(value: number) {
@@ -56,6 +57,10 @@ function formatRulerTime(frame: number, frameRate: { numerator: number; denomina
   const minutes = Math.floor(totalSeconds % 3600 / 60);
   const seconds = totalSeconds % 60;
   return hours ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatSourceSeconds(ticks: number, timeBase: { numerator: number; denominator: number }) {
+  return (ticks * timeBase.numerator / timeBase.denominator).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') || '0';
 }
 
 export default function App() {
@@ -86,6 +91,7 @@ export default function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('clipwright.theme') === 'light' ? 'light' : 'dark');
   const [sessionSources, setSessionSources] = useState<Record<string, SessionMediaSource>>({});
+  const [timelineHistory, setTimelineHistory] = useState<Record<string, TimelineHistory>>({});
   const sessionSourcesRef = useRef<Record<string, SessionMediaSource>>({});
   const [selectedMediaKey, setSelectedMediaKey] = useState<string | null>(null);
   const [pendingRelinkAssetId, setPendingRelinkAssetId] = useState<string | null>(null);
@@ -258,8 +264,16 @@ export default function App() {
       return false;
     }
     try {
+      const sequenceId = currentDocument.projectSettings.defaultSequenceId;
+      const previousSequence = currentDocument.sequences.find((sequence) => sequence.id === sequenceId);
       const updatedDocument = edit(currentDocument);
+      const updatedSequence = updatedDocument.sequences.find((sequence) => sequence.id === sequenceId);
+      if (!previousSequence || !updatedSequence) throw new Error('The default sequence could not be updated.');
       serializeProjectDocument(updatedDocument);
+      setTimelineHistory((current) => {
+        const history = current[projectId] ?? { past: [], future: [] };
+        return { ...current, [projectId]: { past: [...history.past, previousSequence].slice(-50), future: [] } };
+      });
       setDocuments((current) => current.map((document) => document.id === projectId ? updatedDocument : document));
       setProjects((current) => current.map((project) => project.id === projectId ? { ...project, updatedAt: updatedDocument.metadata.modifiedAt } : project));
       notify(successMessage);
@@ -286,6 +300,50 @@ export default function App() {
     if (!activeProjectId) return false;
     return applyTimelineEdit(activeProjectId, (document) => removeVideoClip(document, document.projectSettings.defaultSequenceId, clipId), 'Removed clip from the timeline.');
   }
+
+  function trimTimelineClip(clipId: string, sourceInTick: number, sourceOutTick: number) {
+    if (!activeProjectId) return false;
+    return applyTimelineEdit(activeProjectId, (document) => trimVideoClip(document, document.projectSettings.defaultSequenceId, clipId, sourceInTick, sourceOutTick), 'Updated source trim.');
+  }
+
+  function changeTimelineHistory(projectId: string | null, direction: 'undo' | 'redo') {
+    if (!projectId || persistenceWarning) return false;
+    const currentDocument = documents.find((document) => document.id === projectId);
+    const history = timelineHistory[projectId];
+    if (!currentDocument || !history) return false;
+    const sequenceId = currentDocument.projectSettings.defaultSequenceId;
+    const currentSequence = currentDocument.sequences.find((sequence) => sequence.id === sequenceId);
+    const source = direction === 'undo' ? history.past : history.future;
+    const targetSequence = source[source.length - 1];
+    if (!currentSequence || !targetSequence) return false;
+    const updatedDocument: ProjectDocument = {
+      ...currentDocument,
+      metadata: { ...currentDocument.metadata, modifiedAt: new Date().toISOString() },
+      sequences: currentDocument.sequences.map((sequence) => sequence.id === sequenceId ? targetSequence : sequence),
+    };
+    try {
+      serializeProjectDocument(updatedDocument);
+      setTimelineHistory((current) => {
+        const latest = current[projectId] ?? history;
+        return {
+          ...current,
+          [projectId]: direction === 'undo'
+            ? { past: latest.past.slice(0, -1), future: [...latest.future, currentSequence] }
+            : { past: [...latest.past, currentSequence].slice(-50), future: latest.future.slice(0, -1) },
+        };
+      });
+      setDocuments((current) => current.map((document) => document.id === projectId ? updatedDocument : document));
+      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, updatedAt: updatedDocument.metadata.modifiedAt } : project));
+      notify(direction === 'undo' ? 'Undid the last timeline change.' : 'Redid the timeline change.');
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Timeline history could not be restored.', 'error');
+      return false;
+    }
+  }
+
+  function undoTimelineEdit() { return changeTimelineHistory(activeProjectId, 'undo'); }
+  function redoTimelineEdit() { return changeTimelineHistory(activeProjectId, 'redo'); }
 
   function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate']) {
     if (storageWarning || documentStorageWarning) {
@@ -462,6 +520,7 @@ export default function App() {
       setSessionSources(nextSources);
     }
     setDocuments((current) => current.filter((document) => document.id !== project.id));
+    setTimelineHistory((current) => { const next = { ...current }; delete next[project.id]; return next; });
     if (activeProjectId === project.id) { setActiveProjectId(null); setWorkspace('home'); }
     if (removedDocument?.assets.some((asset) => mediaKey(project.id, asset.id) === selectedMediaKey)) setSelectedMediaKey(null);
     notify('Project entry deleted. Source media was left untouched.');
@@ -564,7 +623,12 @@ export default function App() {
             onSelectMedia={setSelectedMediaKey}
             onAddVideo={addVideoToTimeline}
             onMoveClip={moveTimelineClip}
+            onTrimClip={trimTimelineClip}
             onRemoveClip={deleteTimelineClip}
+            canUndo={Boolean(!persistenceWarning && activeProjectId && timelineHistory[activeProjectId]?.past.length)}
+            canRedo={Boolean(!persistenceWarning && activeProjectId && timelineHistory[activeProjectId]?.future.length)}
+            onUndo={undoTimelineEdit}
+            onRedo={redoTimelineEdit}
             onPlaybackError={() => notify('Browser playback failed. The file may use a codec this browser cannot decode.', 'error')}
           />}
           {workspace === 'clipping' && <ClippingFoundation onCreate={() => setShowCreate(true)} />}
@@ -646,7 +710,12 @@ function EditorFoundation({
   onSelectMedia,
   onAddVideo,
   onMoveClip,
+  onTrimClip,
   onRemoveClip,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   onPlaybackError,
 }: {
   project: Project | null;
@@ -660,7 +729,12 @@ function EditorFoundation({
   onSelectMedia: (key: string) => void;
   onAddVideo: (assetId: string) => string | null;
   onMoveClip: (clipId: string, timelineStartFrame: number) => boolean;
+  onTrimClip: (clipId: string, sourceInTick: number, sourceOutTick: number) => boolean;
   onRemoveClip: (clipId: string) => boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   onPlaybackError: () => void;
 }) {
   const sequence = projectDocument?.sequences.find((item) => item.id === projectDocument.projectSettings.defaultSequenceId) ?? null;
@@ -692,6 +766,8 @@ function EditorFoundation({
   const tickInterval = tenSecondTick * Math.max(1, Math.ceil(timelineVisibleFrames / tenSecondTick / 80));
   const timelineTicks = Array.from({ length: Math.floor(timelineVisibleFrames / tickInterval) + 1 }, (_, index) => index * tickInterval);
   const [startFrameDraft, setStartFrameDraft] = useState('0');
+  const [sourceInDraft, setSourceInDraft] = useState('0');
+  const [sourceOutDraft, setSourceOutDraft] = useState('0');
   const videoRef = useRef<HTMLVideoElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -701,7 +777,10 @@ function EditorFoundation({
 
   useEffect(() => {
     setStartFrameDraft(String(selectedClip?.timelineStartFrame ?? 0));
-  }, [selectedClip?.id, selectedClip?.timelineStartFrame]);
+    const timeBase = selectedClipAsset?.streams.video?.timeBase;
+    setSourceInDraft(selectedClip && timeBase ? formatSourceSeconds(selectedClip.sourceInTick, timeBase) : '0');
+    setSourceOutDraft(selectedClip && timeBase ? formatSourceSeconds(selectedClip.sourceOutTick, timeBase) : '0');
+  }, [selectedClip?.id, selectedClip?.timelineStartFrame, selectedClip?.sourceInTick, selectedClip?.sourceOutTick, selectedClipAsset?.streams.video?.timeBase.numerator, selectedClipAsset?.streams.video?.timeBase.denominator]);
 
   useEffect(() => {
     setCurrentTime(0);
@@ -746,6 +825,18 @@ function EditorFoundation({
     const nextStartFrame = Number(startFrameDraft);
     if (!Number.isSafeInteger(nextStartFrame) || nextStartFrame < 0 || !onMoveClip(selectedClip.id, nextStartFrame)) {
       setStartFrameDraft(String(selectedClip.timelineStartFrame));
+    }
+  }
+
+  function applySourceTrim() {
+    const timeBase = selectedClipAsset?.streams.video?.timeBase;
+    if (!selectedClip || !timeBase || !Number.isFinite(Number(sourceInDraft)) || !Number.isFinite(Number(sourceOutDraft))) return;
+    const sourceInTick = Math.round(Number(sourceInDraft) * timeBase.denominator / timeBase.numerator);
+    const sourceOutTick = Math.round(Number(sourceOutDraft) * timeBase.denominator / timeBase.numerator);
+    if (!Number.isSafeInteger(sourceInTick) || !Number.isSafeInteger(sourceOutTick)
+      || !onTrimClip(selectedClip.id, sourceInTick, sourceOutTick)) {
+      setSourceInDraft(formatSourceSeconds(selectedClip.sourceInTick, timeBase));
+      setSourceOutDraft(formatSourceSeconds(selectedClip.sourceOutTick, timeBase));
     }
   }
 
@@ -808,12 +899,14 @@ function EditorFoundation({
           <div className="timeline-heading">
             <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
             <div className="timeline-tools">
+              <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
+              <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
               <button className="button button-secondary button-small" type="button" onClick={addSelectedSourceToTimeline} disabled={!source || !playableAsset || !videoTracks.some((track) => !track.locked)} title="Append the selected source to an unlocked video track"><Plus size={13} />Add selected source</button>
               <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
               <button type="button" disabled title="Timeline zoom is not available yet"><LayoutPanelLeft size={14} /></button>
             </div>
           </div>
-          {sequence ? <div className="timeline-scroll" aria-label="Timeline tracks">
+          {sequence ? <div className="timeline-scroll" role="region" aria-label="Timeline tracks">
             <div className="timeline-canvas" style={{ width: timelineWidth }}>
               <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
                 {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
@@ -845,7 +938,7 @@ function EditorFoundation({
               </div>)}
             </div>
           </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
-          <div className="timeline-note">Clip placement and sequence length use integer frames. Source preview above is separate; timeline playback, trimming, undo/redo, and export are not included.</div>
+          <div className="timeline-note">Clip placement uses integer frames; source trims use stream ticks. Undo/redo history is session-only. Timeline playback and export are not included.</div>
           {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
         </div>
         <p className="preview-disclaimer">Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.</p>
@@ -861,7 +954,12 @@ function EditorFoundation({
             <label htmlFor="clip-start-frame">Timeline start frame</label>
             <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
           </form>
-          <small>Source trims, clip speed changes, and audio edits are not available yet.</small>
+          {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
+            <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+            <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+            <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
+          </form>}
+          <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
         </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
         <div className="properties-divider"/>
         <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>

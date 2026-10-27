@@ -18,6 +18,17 @@ function roundedRatio(numerator: bigint, denominator: bigint) {
   return (numerator + denominator / 2n) / denominator;
 }
 
+function sourceRangeDurationFrames(sequence: Sequence, timeBase: { numerator: number; denominator: number }, sourceDurationTicks: number, playbackRate: { numerator: number; denominator: number }) {
+  const numerator = BigInt(sourceDurationTicks)
+    * BigInt(timeBase.numerator)
+    * BigInt(sequence.frameRate.numerator)
+    * BigInt(playbackRate.denominator);
+  const denominator = BigInt(timeBase.denominator)
+    * BigInt(sequence.frameRate.denominator)
+    * BigInt(playbackRate.numerator);
+  return Math.max(1, safeNumber(roundedRatio(numerator, denominator), 'Video duration in frames'));
+}
+
 function sequenceEndFrame(sequence: Sequence) {
   let endFrame = 0;
   for (const track of sequence.tracks) {
@@ -62,11 +73,8 @@ export function appendVideoClip(
   if (track.clips.some((clip) => clip.id === clipId)) throw new Error('The new clip ID already exists on this track.');
 
   const stream = asset.streams.video;
-  const framesNumerator = BigInt(stream.durationTicks)
-    * BigInt(stream.timeBase.numerator)
-    * BigInt(sequence.frameRate.numerator);
-  const framesDenominator = BigInt(stream.timeBase.denominator) * BigInt(sequence.frameRate.denominator);
-  const timelineDurationFrames = Math.max(1, safeNumber(roundedRatio(framesNumerator, framesDenominator), 'Video duration in frames'));
+  const playbackRate = { numerator: 1, denominator: 1 };
+  const timelineDurationFrames = sourceRangeDurationFrames(sequence, stream.timeBase, stream.durationTicks, playbackRate);
   const timelineStartFrame = track.clips.reduce((end, clip) => clip.kind === 'video'
     ? Math.max(end, clip.timelineStartFrame + clip.timelineDurationFrames)
     : end, 0);
@@ -80,7 +88,7 @@ export function appendVideoClip(
     sourceOutTick: stream.durationTicks,
     timelineStartFrame,
     timelineDurationFrames,
-    playbackRate: { numerator: 1, denominator: 1 },
+    playbackRate,
   };
   const updatedTrack = { ...track, clips: [...track.clips, clip] };
   const updatedSequence = {
@@ -88,6 +96,46 @@ export function appendVideoClip(
     tracks: sequence.tracks.map((item) => item.id === track.id ? updatedTrack : item),
   };
   updatedSequence.durationFrames = Math.max(sequenceEndFrame(updatedSequence), timelineStartFrame + timelineDurationFrames);
+  return withSequence(document, updatedSequence, options.modifiedAt);
+}
+
+/** Trim a video clip to a non-empty source-tick range and recalculate its frame length. */
+export function trimVideoClip(
+  document: ProjectDocument,
+  sequenceId: string,
+  clipId: string,
+  sourceInTick: number,
+  sourceOutTick: number,
+  options: TimelineOptions = {},
+): ProjectDocument {
+  const sequence = getSequence(document, sequenceId);
+  const track = sequence.tracks.find((item) => item.kind === 'video' && item.clips.some((clip) => clip.id === clipId));
+  if (!track || track.locked) throw new Error('The selected video clip is not on an editable video track.');
+  const clip = track.clips.find((item): item is VideoClip => item.id === clipId && item.kind === 'video');
+  if (!clip) throw new Error('The selected video clip could not be found.');
+  const asset = document.assets.find((item) => item.id === clip.assetId && item.kind === 'video' && item.streams.video);
+  if (!asset?.streams.video) throw new Error('The selected clip has no video stream metadata.');
+  const stream = asset.streams.video;
+  if (!Number.isSafeInteger(sourceInTick) || !Number.isSafeInteger(sourceOutTick)
+    || sourceInTick < 0 || sourceOutTick <= sourceInTick || sourceOutTick > stream.durationTicks) {
+    throw new Error(`Source trim must be a non-empty range within 0–${stream.durationTicks} ticks.`);
+  }
+  const timelineDurationFrames = sourceRangeDurationFrames(sequence, stream.timeBase, sourceOutTick - sourceInTick, clip.playbackRate);
+  const nextEnd = clip.timelineStartFrame + timelineDurationFrames;
+  if (!Number.isSafeInteger(nextEnd)) throw new Error('The trimmed clip end exceeds the supported timeline range.');
+  const overlaps = track.clips.some((item) => item.kind === 'video' && item.id !== clipId
+    && clip.timelineStartFrame < item.timelineStartFrame + item.timelineDurationFrames
+    && item.timelineStartFrame < nextEnd);
+  if (overlaps) throw new Error('This source trim would overlap another video clip on the same track.');
+
+  const updatedTrack = {
+    ...track,
+    clips: track.clips.map((item) => item.id === clipId && item.kind === 'video'
+      ? { ...item, sourceInTick, sourceOutTick, timelineDurationFrames }
+      : item),
+  };
+  const updatedSequence = { ...sequence, tracks: sequence.tracks.map((item) => item.id === track.id ? updatedTrack : item) };
+  updatedSequence.durationFrames = sequenceEndFrame(updatedSequence);
   return withSequence(document, updatedSequence, options.modifiedAt);
 }
 

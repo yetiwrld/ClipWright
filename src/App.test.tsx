@@ -31,7 +31,7 @@ describe('ClipWright foundation UI', () => {
     expect(screen.getByText(/choose a local video to read browser-reported metadata/i)).toBeTruthy();
   });
 
-  it('imports a local video for browser-session metadata and source preview only', async () => {
+  it('imports, previews, relinks, and edits a browser-session video on the timeline', async () => {
     const firstRender = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
     fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Local source test' } });
@@ -90,16 +90,38 @@ describe('ClipWright foundation UI', () => {
     expect(edited[0].sequences[0].durationFrames).toBe(244);
     expect(edited[0].sequences[0].tracks[0].clips[0]).toMatchObject({ timelineStartFrame: 0, timelineDurationFrames: 244 });
 
+    fireEvent.click(screen.getByRole('button', { name: 'Undo timeline change' }));
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[0].clips).toHaveLength(0));
+    fireEvent.click(screen.getByRole('button', { name: 'Redo timeline change' }));
+    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 0' })).toBeTruthy();
+
     fireEvent.change(screen.getByLabelText('Timeline start frame'), { target: { value: '20' } });
     fireEvent.click(screen.getByRole('button', { name: 'Set' }));
     expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 20' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Add selected source' }));
-    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 264' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Remove selected clip' }));
+    fireEvent.change(screen.getByLabelText('Source out (seconds)'), { target: { value: '4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply trim' }));
+    await waitFor(() => {
+      const current = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0];
+      expect(current.durationFrames).toBe(140);
+      expect(current.tracks[0].clips[0]).toMatchObject({ sourceInTick: 0, sourceOutTick: 4_000_000, timelineStartFrame: 20, timelineDurationFrames: 120 });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Undo timeline change' }));
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[0].clips[0].sourceOutTick).toBe(8_125_000));
+    fireEvent.click(screen.getByRole('button', { name: 'Redo timeline change' }));
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[0].clips[0].sourceOutTick).toBe(4_000_000));
 
+    fireEvent.click(screen.getByRole('button', { name: 'Add selected source' }));
+    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 140' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove selected clip' }));
     edited = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
-    expect(edited[0].sequences[0].durationFrames).toBe(264);
+    expect(edited[0].sequences[0].durationFrames).toBe(140);
     expect(edited[0].sequences[0].tracks[0].clips).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Undo timeline change' }));
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[0].clips).toHaveLength(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Redo timeline change' }));
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[0].clips).toHaveLength(1));
+
     fireEvent.click(screen.getByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 20' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove selected clip' }));
     edited = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
