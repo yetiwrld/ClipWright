@@ -5,6 +5,7 @@ import {
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, ListFilter, Maximize2,
   MoreHorizontal, Minimize2, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut,
+  Eye, EyeOff, Lock, LockOpen,
   X, type LucideIcon,
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
@@ -43,7 +44,7 @@ type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
 const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
 const TIMELINE_LAYOUT_VERSION_KEY = 'clipwright.workspace.timeline-layout-v2';
-const TIMELINE_ZOOM_KEY = 'clipwright.workspace.timeline-zoom';
+const TIMELINE_PX_PER_SECOND_KEY = 'clipwright.workspace.timeline-px-per-second';
 const TIMELINE_RESIZE_HANDLE_HEIGHT = 6;
 const TIMELINE_MIN_PANEL_HEIGHT = 150;
 
@@ -63,20 +64,36 @@ function storeTimelineHeight(value: number) {
   catch { /* The workspace remains usable when preferences cannot be persisted. */ }
 }
 
-function readTimelineZoom() {
+function readTimelinePxPerSecond() {
   try {
-    const value = Number(window.localStorage.getItem(TIMELINE_ZOOM_KEY));
-    return Number.isFinite(value) && value >= 0.25 && value <= 4 ? value : 1;
-  } catch { return 1; }
+    const value = Number(window.localStorage.getItem(TIMELINE_PX_PER_SECOND_KEY));
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch { return 0; }
 }
 
-function storeTimelineZoom(value: number) {
-  try { window.localStorage.setItem(TIMELINE_ZOOM_KEY, String(value)); }
+function storeTimelinePxPerSecond(value: number) {
+  try { window.localStorage.setItem(TIMELINE_PX_PER_SECOND_KEY, String(value)); }
   catch { /* The workspace remains usable when preferences cannot be persisted. */ }
 }
 
-function niceRulerIntervalSeconds(target: number) {
-  return [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600].find((value) => value >= target) ?? Math.ceil(target / 3600) * 3600;
+function chooseRulerStep(pxPerSecond: number, frameRate: number) {
+  const candidates = [1 / frameRate, 5 / frameRate, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 18000, 36000];
+  return candidates.find((seconds) => seconds * pxPerSecond >= 80) ?? Math.ceil(80 / pxPerSecond / 3600) * 3600;
+}
+
+function formatRulerLabel(seconds: number, frameRate: number, stepSeconds: number) {
+  const safeSeconds = Math.max(0, seconds);
+  const wholeSeconds = Math.floor(safeSeconds + 1e-7);
+  const hours = Math.floor(wholeSeconds / 3600);
+  const minutes = Math.floor(wholeSeconds % 3600 / 60);
+  const remainder = wholeSeconds % 60;
+  if (stepSeconds < 1) {
+    const frames = Math.floor((safeSeconds - wholeSeconds) * frameRate + 1e-6);
+    return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
+  }
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
 }
 
 function formatPlaybackTime(value: number) {
@@ -326,6 +343,32 @@ export default function App() {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'The timeline edit could not be applied.', 'error');
       return false;
+    }
+  }
+
+  function toggleTrackState(trackId: string, field: 'muted' | 'locked') {
+    if (!activeProjectId || persistenceWarning) return;
+    const currentDocument = documents.find((document) => document.id === activeProjectId);
+    if (!currentDocument) return;
+    const sequenceId = currentDocument.projectSettings.defaultSequenceId;
+    const sequence = currentDocument.sequences.find((item) => item.id === sequenceId);
+    const track = sequence?.tracks.find((item) => item.id === trackId);
+    if (!sequence || !track) return;
+    const modifiedAt = new Date().toISOString();
+    const updatedDocument: ProjectDocument = {
+      ...currentDocument,
+      metadata: { ...currentDocument.metadata, modifiedAt },
+      sequences: currentDocument.sequences.map((item) => item.id !== sequenceId ? item : {
+        ...item,
+        tracks: item.tracks.map((entry) => entry.id === trackId ? { ...entry, [field]: !entry[field] } : entry),
+      }),
+    };
+    try {
+      serializeProjectDocument(updatedDocument);
+      setDocuments((current) => current.map((document) => document.id === activeProjectId ? updatedDocument : document));
+      setProjects((current) => current.map((project) => project.id === activeProjectId ? { ...project, updatedAt: modifiedAt } : project));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not update the track.', 'error');
     }
   }
 
@@ -684,6 +727,7 @@ export default function App() {
             onMoveClip={moveTimelineClip}
             onTrimClip={trimTimelineClip}
             onRemoveClip={deleteTimelineClip}
+            onToggleTrackState={toggleTrackState}
             canUndo={Boolean(!persistenceWarning && activeProjectId && timelineHistory[activeProjectId]?.past.length)}
             canRedo={Boolean(!persistenceWarning && activeProjectId && timelineHistory[activeProjectId]?.future.length)}
             onUndo={undoTimelineEdit}
@@ -772,6 +816,7 @@ function EditorFoundation({
   onMoveClip,
   onTrimClip,
   onRemoveClip,
+  onToggleTrackState,
   canUndo,
   canRedo,
   onUndo,
@@ -792,6 +837,7 @@ function EditorFoundation({
   onMoveClip: (clipId: string, timelineStartFrame: number) => boolean;
   onTrimClip: (clipId: string, sourceInTick: number, sourceOutTick: number) => boolean;
   onRemoveClip: (clipId: string) => boolean;
+  onToggleTrackState: (trackId: string, field: 'muted' | 'locked') => void;
   canUndo: boolean;
   canRedo: boolean;
   onUndo: () => void;
@@ -811,12 +857,14 @@ function EditorFoundation({
   const metadataDuration = stream ? stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator : 0;
   const videoTracks = sequence?.tracks.filter((track) => track.kind === 'video') ?? [];
   const audioTracks = sequence?.tracks.filter((track) => track.kind === 'audio') ?? [];
-  const timelineTrackRowTemplate = `repeat(${Math.max(1, videoTracks.length + audioTracks.length)}, minmax(64px, 1fr))`;
+  const timelineTrackRowTemplate = `repeat(${Math.max(1, videoTracks.length + audioTracks.length)}, 60px)`;
   const videoClips = videoTracks.flatMap((track) => track.clips.filter((clip): clip is VideoClip => clip.kind === 'video'));
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
   const [mediaPanelCollapsed, setMediaPanelCollapsed] = useState(false);
   const [timelinePlayheadFrame, setTimelinePlayheadFrame] = useState(0);
   const [timelineSyncClipId, setTimelineSyncClipId] = useState<string | null>(null);
+  const [hiddenTrackIds, setHiddenTrackIds] = useState<Record<string, boolean>>({});
+  const [timelineScrollOffsets, setTimelineScrollOffsets] = useState({ left: 0, top: 0 });
   const pendingPreviewSeekRef = useRef<{ assetId: string; url: string | null; seconds: number } | null>(null);
   const selectedClip = videoClips.find((clip) => clip.id === selectedTimelineClipId) ?? null;
   const timelineSyncClip = videoClips.find((clip) => clip.id === timelineSyncClipId) ?? null;
@@ -826,25 +874,40 @@ function EditorFoundation({
   const editorLayoutRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const timelineTrackHeaderRowsRef = useRef<HTMLDivElement>(null);
+  const timelineRulerContentRef = useRef<HTMLDivElement>(null);
+  const timelineRulerPlayheadRef = useRef<HTMLDivElement>(null);
   const timelinePlayheadRef = useRef<HTMLDivElement>(null);
   const playheadPointerRef = useRef<number | null>(null);
+  const rulerPointerRef = useRef<number | null>(null);
+  const autoFollowRef = useRef(true);
+  const suppressProgrammaticScrollRef = useRef(false);
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
   const timelineHeightRef = useRef(0);
   const [editorLayoutSize, setEditorLayoutSize] = useState({ width: 0, height: 0 });
+  const [timelineViewportSize, setTimelineViewportSize] = useState({ width: 0, height: 0 });
   const [timelineHeight, setTimelineHeight] = useState(readTimelineHeight);
-  const [timelineZoom, setTimelineZoom] = useState(readTimelineZoom);
+  const [pxPerSecond, setPxPerSecond] = useState(readTimelinePxPerSecond);
   timelineHeightRef.current = timelineHeight;
   const sequenceDurationFrames = sequence ? Math.max(sequence.durationFrames, sequenceDurationInFrames(sequence)) : 0;
-  const timelineVisibleFrames = Math.max(sequenceDurationFrames, Math.ceil(frameRateValue * 20));
-  const timelineHeaderWidth = 150;
-  const timelineViewportWidth = Math.max(350, editorLayoutSize.width ? editorLayoutSize.width - 26 : Math.min(1_600, window.innerWidth - 260));
-  const timelineAvailableWidth = Math.max(200, timelineViewportWidth - timelineHeaderWidth);
-  const timelinePixelsPerFrame = Math.max(0.001, timelineAvailableWidth / timelineVisibleFrames * timelineZoom);
-  const timelineCanvasFrames = Math.max(timelineVisibleFrames, Math.ceil(timelineAvailableWidth / timelinePixelsPerFrame));
-  const timelineContentWidth = Math.min(119_850, Math.max(200, Math.ceil(timelineCanvasFrames * timelinePixelsPerFrame)));
-  const tickSeconds = niceRulerIntervalSeconds(80 / Math.max(0.001, timelinePixelsPerFrame * frameRateValue));
-  const tickInterval = Math.max(1, Math.round(frameRateValue * tickSeconds));
-  const timelineTicks = Array.from({ length: Math.min(2_000, Math.floor(timelineCanvasFrames / tickInterval) + 1) }, (_, index) => index * tickInterval);
+  const timelineProjectDurationSeconds = sequenceDurationFrames > 0 ? sequenceDurationFrames / Math.max(1, frameRateValue) : 20;
+  const timelineViewportWidth = timelineViewportSize.width || Math.max(320, window.innerWidth - 714);
+  const timelineViewportHeight = timelineViewportSize.height || 240;
+  const maximumPxPerSecond = frameRateValue * 30;
+  const minimumPxPerSecond = Math.min(timelineViewportWidth / (timelineProjectDurationSeconds * 1.15), maximumPxPerSecond);
+  const timelineScale = Math.max(minimumPxPerSecond, Math.min(pxPerSecond || minimumPxPerSecond, maximumPxPerSecond));
+  const timelineTotalSeconds = timelineProjectDurationSeconds * 1.15;
+  const timelineContentWidth = Math.ceil(Math.max(timelineViewportWidth, timelineTotalSeconds * timelineScale));
+  const timelineCanvasFrames = Math.ceil(timelineContentWidth / timelineScale * frameRateValue);
+  const timelineRowsContentHeight = Math.max(timelineViewportHeight, Math.max(1, videoTracks.length + audioTracks.length) * 60);
+  const rulerStepSeconds = chooseRulerStep(timelineScale, frameRateValue);
+  const rulerMinorStepSeconds = rulerStepSeconds <= 5 / frameRateValue + 1e-7 ? 1 / frameRateValue : rulerStepSeconds / 5;
+  const rulerMajorEvery = Math.max(1, Math.round(rulerStepSeconds / rulerMinorStepSeconds));
+  const firstRulerTick = Math.max(0, Math.floor((timelineScrollOffsets.left / timelineScale - rulerStepSeconds * 2) / rulerMinorStepSeconds));
+  const lastRulerTick = Math.min(Math.ceil(timelineTotalSeconds / rulerMinorStepSeconds), Math.ceil(((timelineScrollOffsets.left + timelineViewportWidth) / timelineScale + rulerStepSeconds * 2) / rulerMinorStepSeconds));
+  const timelineTicks = Array.from({ length: Math.max(0, lastRulerTick - firstRulerTick + 1) }, (_, offset) => {
+    const index = firstRulerTick + offset;
+    return { index, seconds: index * rulerMinorStepSeconds, major: index % rulerMajorEvery === 0 };
+  });
   const editorAvailableHeight = editorLayoutSize.height || Math.max(360, window.innerHeight - (focusMode ? 0 : 62));
   const previewMinHeight = Math.floor(editorAvailableHeight * 0.3);
   const previewMaxHeight = Math.floor(editorAvailableHeight * 0.75);
@@ -881,6 +944,24 @@ function EditorFoundation({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    const element = timelineScrollRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setTimelineViewportSize({ width: Math.ceil(entry.contentRect.width), height: Math.ceil(entry.contentRect.height) });
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (Math.abs(pxPerSecond - timelineScale) > 0.001) setPxPerSecond(timelineScale);
+  }, [pxPerSecond, timelineScale]);
+
+  useEffect(() => {
+    if (isPlaying) autoFollowRef.current = true;
+  }, [isPlaying]);
 
   useEffect(() => {
     setStartFrameDraft(String(selectedClip?.timelineStartFrame ?? 0));
@@ -924,10 +1005,18 @@ function EditorFoundation({
       const playhead = timelinePlayheadRef.current;
       if (video && playhead) {
         const elapsed = Math.max(0, video.currentTime - sourceInSeconds) / playbackRate * frameRateValue;
-        const frame = Math.min(clipEndFrame, timelineSyncClip.timelineStartFrame + elapsed);
-        playhead.style.transform = `translateX(${frame * timelinePixelsPerFrame}px)`;
+        const frame = Math.round(Math.min(clipEndFrame, timelineSyncClip.timelineStartFrame + elapsed));
+        updateTimelinePlayheadVisual(frame);
+        if (autoFollowRef.current) {
+          const scroller = timelineScrollRef.current;
+          const width = scroller?.clientWidth ?? 0;
+          const pixelX = frame / frameRateValue * timelineScale;
+          if (scroller && width > 0 && pixelX > scroller.scrollLeft + width - 80) {
+            scrollTimelineProgrammatically(pixelX - width * 0.7);
+          }
+        }
         if (now - lastReadoutUpdate >= 100) {
-          setTimelinePlayheadFrame(Math.floor(frame));
+          setTimelinePlayheadFrame(Math.round(frame));
           lastReadoutUpdate = now;
         }
       }
@@ -935,7 +1024,7 @@ function EditorFoundation({
     };
     animationFrame = window.requestAnimationFrame(animatePlayhead);
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [isPlaying, timelineSyncClip?.id, timelineSyncClip?.timelineStartFrame, timelineSyncClip?.timelineDurationFrames, timelineSyncClip?.sourceInTick, timelineSyncClip?.playbackRate.numerator, timelineSyncClip?.playbackRate.denominator, frameRateValue, timelinePixelsPerFrame]);
+  }, [isPlaying, timelineSyncClip?.id, timelineSyncClip?.timelineStartFrame, timelineSyncClip?.timelineDurationFrames, timelineSyncClip?.sourceInTick, timelineSyncClip?.playbackRate.numerator, timelineSyncClip?.playbackRate.denominator, frameRateValue, timelineScale]);
 
   function seekBy(seconds: number) {
     const video = videoRef.current;
@@ -962,7 +1051,7 @@ function EditorFoundation({
     if (!sequence) return;
     const frame = Math.max(0, Math.min(timelineCanvasFrames, Math.round(requestedFrame)));
     setTimelinePlayheadFrame(frame);
-    if (timelinePlayheadRef.current) timelinePlayheadRef.current.style.transform = `translateX(${frame * timelinePixelsPerFrame}px)`;
+    updateTimelinePlayheadVisual(frame);
     const clip = videoClips.find((item) => frame >= item.timelineStartFrame && frame < item.timelineStartFrame + item.timelineDurationFrames);
     if (!clip || !projectDocument) {
       setTimelineSyncClipId(null);
@@ -998,15 +1087,44 @@ function EditorFoundation({
     }
   }
 
+  function updateTimelinePlayheadVisual(frame: number) {
+    const pixelX = frame / Math.max(1, frameRateValue) * timelineScale;
+    if (timelinePlayheadRef.current) timelinePlayheadRef.current.style.transform = `translateX(${pixelX}px)`;
+    if (timelineRulerPlayheadRef.current) {
+      const scrollLeft = timelineScrollRef.current?.scrollLeft ?? timelineScrollOffsets.left;
+      timelineRulerPlayheadRef.current.style.transform = `translateX(${pixelX - scrollLeft}px)`;
+    }
+  }
+
   function seekTimelineAtClientX(clientX: number) {
-    const canvas = timelineScrollRef.current?.querySelector('.timeline-canvas');
-    if (!canvas) return;
-    const frame = (clientX - canvas.getBoundingClientRect().left) / timelinePixelsPerFrame;
-    seekTimelineFrame(frame);
+    const scroller = timelineScrollRef.current;
+    if (!scroller || !sequence) return;
+    const seconds = (scroller.scrollLeft + clientX - scroller.getBoundingClientRect().left) / timelineScale;
+    seekTimelineFrame(seconds * frameRateValue);
   }
 
   function handleTimelineClick(event: React.MouseEvent<HTMLDivElement>) {
     seekTimelineAtClientX(event.clientX);
+  }
+
+  function beginRulerScrub(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    rulerPointerRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    seekTimelineAtClientX(event.clientX);
+  }
+
+  function moveRulerScrub(event: React.PointerEvent<HTMLDivElement>) {
+    if (rulerPointerRef.current !== event.pointerId) return;
+    event.preventDefault();
+    seekTimelineAtClientX(event.clientX);
+  }
+
+  function endRulerScrub(event: React.PointerEvent<HTMLDivElement>) {
+    if (rulerPointerRef.current !== event.pointerId) return;
+    rulerPointerRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   }
 
   function beginPlayheadDrag(event: React.PointerEvent<HTMLButtonElement>) {
@@ -1081,7 +1199,7 @@ function EditorFoundation({
     setSelectedTimelineClipId(clip.id);
     const bounds = event?.currentTarget.getBoundingClientRect();
     const frame = event && bounds && bounds.width > 0
-      ? clip.timelineStartFrame + (event.clientX - bounds.left) / timelinePixelsPerFrame
+      ? clip.timelineStartFrame + (event.clientX - bounds.left) / timelineScale * frameRateValue
       : clip.timelineStartFrame;
     seekTimelineFrame(frame);
   }
@@ -1162,29 +1280,57 @@ function EditorFoundation({
     }
   }
 
-  function zoomTimeline(next: number, preserveAnchor = true) {
-    const zoom = Math.max(0.25, Math.min(4, Number(next.toFixed(2))));
+  function scrollTimelineProgrammatically(left: number, top?: number) {
     const scroller = timelineScrollRef.current;
-    const anchorFrame = scroller
-      ? Math.max(0, (scroller.scrollLeft + scroller.clientWidth / 2) / timelinePixelsPerFrame)
-      : 0;
-    setTimelineZoom(zoom);
-    storeTimelineZoom(zoom);
-    if (scroller && preserveAnchor) window.requestAnimationFrame(() => {
-      const nextPixelsPerFrame = timelineAvailableWidth / timelineVisibleFrames * zoom;
-      scroller.scrollLeft = Math.max(0, anchorFrame * nextPixelsPerFrame - scroller.clientWidth / 2);
-    });
+    if (!scroller) return;
+    suppressProgrammaticScrollRef.current = true;
+    scroller.scrollLeft = Math.max(0, left);
+    if (top !== undefined) scroller.scrollTop = Math.max(0, top);
+    window.requestAnimationFrame(() => { suppressProgrammaticScrollRef.current = false; });
   }
 
-  function syncTimelineHeaderScroll(event: React.UIEvent<HTMLDivElement>) {
-    if (timelineTrackHeaderRowsRef.current) {
-      timelineTrackHeaderRowsRef.current.style.transform = `translateY(-${event.currentTarget.scrollTop}px)`;
+  function zoomTimeline(next: number, anchorClientX?: number) {
+    const scale = Math.max(minimumPxPerSecond, Math.min(maximumPxPerSecond, next));
+    const scroller = timelineScrollRef.current;
+    const bounds = scroller?.getBoundingClientRect();
+    const anchorX = scroller && bounds
+      ? (anchorClientX === undefined ? scroller.clientWidth / 2 : anchorClientX - bounds.left)
+      : 0;
+    const anchorSeconds = scroller ? (scroller.scrollLeft + anchorX) / timelineScale : 0;
+    setPxPerSecond(scale);
+    storeTimelinePxPerSecond(scale);
+    if (scroller) window.requestAnimationFrame(() => scrollTimelineProgrammatically(anchorSeconds * scale - anchorX));
+  }
+
+  function handleTimelineWheel(event: React.WheelEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement).closest('.timeline-corner, .timeline-track-header-column')) return;
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      const factor = event.deltaY > 0 ? 1 / 1.12 : 1.12;
+      zoomTimeline(timelineScale * factor, event.clientX);
+      return;
+    }
+    if (event.shiftKey) {
+      event.preventDefault();
+      const scroller = timelineScrollRef.current;
+      if (scroller) scroller.scrollLeft += Math.abs(event.deltaX) > 0 ? event.deltaX : event.deltaY;
     }
   }
 
+  function syncTimelineHeaderScroll(event: React.UIEvent<HTMLDivElement>) {
+    const { scrollLeft, scrollTop } = event.currentTarget;
+    if (timelineTrackHeaderRowsRef.current) timelineTrackHeaderRowsRef.current.style.transform = `translateY(-${scrollTop}px)`;
+    if (timelineRulerContentRef.current) timelineRulerContentRef.current.style.transform = `translateX(-${scrollLeft}px)`;
+    updateTimelinePlayheadVisual(timelinePlayheadFrame);
+    setTimelineScrollOffsets({ left: scrollLeft, top: scrollTop });
+    if (suppressProgrammaticScrollRef.current) suppressProgrammaticScrollRef.current = false;
+    else autoFollowRef.current = false;
+  }
+
   function fitTimelineToProject() {
-    zoomTimeline(1, false);
-    if (timelineScrollRef.current) timelineScrollRef.current.scrollLeft = 0;
+    setPxPerSecond(minimumPxPerSecond);
+    storeTimelinePxPerSecond(minimumPxPerSecond);
+    scrollTimelineProgrammatically(0, 0);
   }
 
   return <section className="editor-foundation">
@@ -1297,7 +1443,7 @@ function EditorFoundation({
       ><span /></div>
       <div className="timeline-panel" style={{ height: effectiveTimelineHeight }}>
         <div className="timeline-heading">
-          <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span>{sequence && <span className="timeline-timecode" aria-label={`Playhead at ${formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}`}>{formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}</span>}</div>
+          <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
           <div className="timeline-tools">
             <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
             <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
@@ -1305,85 +1451,114 @@ function EditorFoundation({
             <button type="button" aria-label="Remove selected clip" disabled={!selectedClip || !!selectedClipTrack?.locked} title="Remove selected clip" onClick={removeSelectedClip}><Trash2 size={14} /></button>
             {focusMode && <button className="focus-mode-inline" type="button" aria-label="Exit focus mode" title="Exit focus mode (Esc)" onClick={onToggleFocusMode}><Minimize2 size={20} /></button>}
             <div className="timeline-zoom" role="group" aria-label="Timeline zoom controls">
-              <button type="button" aria-label="Zoom timeline out" title="Zoom timeline out" disabled={timelineZoom <= 0.25} onClick={() => zoomTimeline(timelineZoom / 1.25)}><ZoomOut size={14} /></button>
-              <input aria-label="Timeline zoom level" type="range" min="0.25" max="4" step="0.05" value={timelineZoom} onChange={(event) => zoomTimeline(Number(event.target.value))} />
-              <button type="button" aria-label="Zoom timeline in" title="Zoom timeline in" disabled={timelineZoom >= 4} onClick={() => zoomTimeline(timelineZoom * 1.25)}><ZoomIn size={14} /></button>
+              <button type="button" aria-label="Zoom timeline out" title="Zoom timeline out" disabled={timelineScale <= minimumPxPerSecond + 0.001} onClick={() => zoomTimeline(timelineScale / 1.25)}><ZoomOut size={14} /></button>
+              <input aria-label="Timeline zoom level" type="range" min="0" max="100" step="1" value={maximumPxPerSecond > minimumPxPerSecond ? Math.round(Math.log(timelineScale / minimumPxPerSecond) / Math.log(maximumPxPerSecond / minimumPxPerSecond) * 100) : 0} onChange={(event) => zoomTimeline(minimumPxPerSecond * Math.pow(maximumPxPerSecond / minimumPxPerSecond, Number(event.target.value) / 100))} />
+              <button type="button" aria-label="Zoom timeline in" title="Zoom timeline in" disabled={timelineScale >= maximumPxPerSecond - 0.001} onClick={() => zoomTimeline(timelineScale * 1.25)}><ZoomIn size={14} /></button>
               <button type="button" aria-label="Fit project in timeline" title="Fit project in timeline" onClick={fitTimelineToProject}><Maximize2 size={14} /></button>
-              <output aria-live="polite">{Math.round(timelineZoom * 100)}%</output>
+              <output aria-live="polite">{Math.round(timelineScale / minimumPxPerSecond * 100)}%</output>
             </div>
           </div>
         </div>
-        {sequence ? <div className="timeline-track-layout">
+        {sequence ? <div className="timeline-grid" onWheel={handleTimelineWheel}>
+          <div className="timeline-corner" role="group" aria-label={`Playhead at ${formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}`}>
+            <span>{formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}</span>
+          </div>
+          <div
+            className="timeline-ruler-viewport"
+            onPointerDown={beginRulerScrub}
+            onPointerMove={moveRulerScrub}
+            onPointerUp={endRulerScrub}
+            onPointerCancel={endRulerScrub}
+            role="group"
+            aria-label="Timeline ruler"
+          >
+            <div ref={timelineRulerContentRef} className="timeline-ruler" style={{ width: timelineContentWidth, transform: `translateX(-${timelineScrollOffsets.left}px)` }}>
+              {timelineTicks.map(({ index, seconds, major }) => <span className={`timeline-tick ${major ? 'is-major' : 'is-minor'}`} key={index} style={{ left: `${seconds * timelineScale}px` }}>
+                <i aria-hidden="true" />{major && <em>{formatRulerLabel(seconds, frameRateValue, rulerStepSeconds)}</em>}
+              </span>)}
+            </div>
+            <div ref={timelineRulerPlayheadRef} className="timeline-ruler-playhead" style={{ transform: `translateX(${timelinePlayheadFrame / frameRateValue * timelineScale - timelineScrollOffsets.left}px)` }}>
+              <button
+                className="timeline-playhead-grab"
+                type="button"
+                role="slider"
+                aria-label="Timeline playhead"
+                aria-valuemin={0}
+                aria-valuemax={timelineCanvasFrames}
+                aria-valuenow={timelinePlayheadFrame}
+                aria-valuetext={formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}
+                onPointerDown={beginPlayheadDrag}
+                onPointerMove={movePlayheadDrag}
+                onPointerUp={endPlayheadDrag}
+                onPointerCancel={endPlayheadDrag}
+                onKeyDown={handlePlayheadKeyDown}
+                onClick={(event) => event.stopPropagation()}
+              />
+            </div>
+          </div>
           <div className="timeline-track-header-column">
-            <div className="timeline-track-header-ruler" aria-hidden="true" />
-            <div className="timeline-track-header-rows" ref={timelineTrackHeaderRowsRef} style={{ gridTemplateRows: timelineTrackRowTemplate }}>
-              {videoTracks.map((track, trackIndex) => <div className="track-row" key={track.id}>
-                <span className="track-name" title={track.name}><b>V{trackIndex + 1}</b><span>{track.name}</span></span>
+            <div className="timeline-track-header-rows" ref={timelineTrackHeaderRowsRef} style={{ gridTemplateRows: timelineTrackRowTemplate, height: timelineRowsContentHeight }}>
+              {videoTracks.map((track, trackIndex) => <div className={`track-row${hiddenTrackIds[track.id] ? ' is-track-hidden' : ''}`} key={track.id}>
+                <div className="track-header" title={track.name}>
+                  <span className="track-badge video-track-badge">V{trackIndex + 1}</span><span className="track-header-name">{track.name}</span>
+                  <div className="track-header-actions">
+                    <button className="track-action" type="button" title={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`} aria-label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`} aria-pressed={track.muted} onClick={() => onToggleTrackState(track.id, 'muted')}>{track.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}</button>
+                    <button className="track-action" type="button" title={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`} aria-label={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`} aria-pressed={track.locked} onClick={() => onToggleTrackState(track.id, 'locked')}>{track.locked ? <Lock size={12} /> : <LockOpen size={12} />}</button>
+                    <button className="track-action" type="button" title={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-label={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-pressed={!!hiddenTrackIds[track.id]} onClick={() => setHiddenTrackIds((current) => ({ ...current, [track.id]: !current[track.id] }))}>{hiddenTrackIds[track.id] ? <EyeOff size={12} /> : <Eye size={12} />}</button>
+                  </div>
+                </div>
               </div>)}
-              {audioTracks.map((track, trackIndex) => <div className="track-row audio-track" key={track.id}>
-                <span className="track-name" title={track.name}><b>A{trackIndex + 1}</b><span>{track.name}</span></span>
+              {audioTracks.map((track, trackIndex) => <div className={`track-row audio-track is-unsupported${hiddenTrackIds[track.id] ? ' is-track-hidden' : ''}`} key={track.id}>
+                <div className="track-header" title="Coming soon — audio track editing is not available yet">
+                  <span className="track-badge audio-track-badge">A{trackIndex + 1}</span><span className="track-header-name">{track.name}</span>
+                  <div className="track-header-actions">
+                    <button className="track-action" type="button" title={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`} aria-label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`} aria-pressed={track.muted} onClick={() => onToggleTrackState(track.id, 'muted')}>{track.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}</button>
+                    <button className="track-action" type="button" title={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`} aria-label={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`} aria-pressed={track.locked} onClick={() => onToggleTrackState(track.id, 'locked')}>{track.locked ? <Lock size={12} /> : <LockOpen size={12} />}</button>
+                    <button className="track-action" type="button" title={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-label={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-pressed={!!hiddenTrackIds[track.id]} onClick={() => setHiddenTrackIds((current) => ({ ...current, [track.id]: !current[track.id] }))}>{hiddenTrackIds[track.id] ? <EyeOff size={12} /> : <Eye size={12} />}</button>
+                  </div>
+                </div>
               </div>)}
             </div>
           </div>
-          <div className="timeline-scroll" ref={timelineScrollRef} onScroll={syncTimelineHeaderScroll} onClick={handleTimelineClick} role="region" aria-label="Timeline tracks">
-            <div className="timeline-canvas" style={{ width: timelineContentWidth }}>
-              <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
-                {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
+          <div className="timeline-track-area" ref={timelineScrollRef} onScroll={syncTimelineHeaderScroll} onClick={handleTimelineClick} role="region" aria-label="Timeline tracks">
+            <div className="timeline-canvas" style={{ width: timelineContentWidth, minHeight: timelineRowsContentHeight }}>
+              <div className="timeline-track-rows" style={{ gridTemplateRows: timelineTrackRowTemplate, height: timelineRowsContentHeight }}>
+                {videoTracks.map((track) => {
+                  const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
+                  return <div className={`track-row${hiddenTrackIds[track.id] ? ' is-track-hidden' : ''}`} key={track.id}>
+                    <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${rulerStepSeconds * timelineScale}px 100%` }}>
+                      {clips.length ? clips.map((clip) => {
+                        const asset = assets.find((item) => item.id === clip.assetId);
+                        return <button
+                          className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
+                          type="button"
+                          key={clip.id}
+                          style={{ left: clip.timelineStartFrame / frameRateValue * timelineScale, width: Math.max(4, clip.timelineDurationFrames / frameRateValue * timelineScale) }}
+                          aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
+                          aria-pressed={selectedTimelineClipId === clip.id}
+                          title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
+                          onClick={(event) => { event.stopPropagation(); selectTimelineClip(clip, event); }}
+                        >{asset?.name ?? 'Video clip'}</button>;
+                      }) : <div className="empty-track"><span>Select a source in Project media, then choose “Add selected source”</span></div>}
+                    </div>
+                  </div>;
+                })}
+                {audioTracks.map((track) => {
+                  const clips = track.clips.filter((clip): clip is AudioClip => clip.kind === 'audio');
+                  return <div className={`track-row audio-track is-unsupported${hiddenTrackIds[track.id] ? ' is-track-hidden' : ''}`} key={track.id}>
+                    <div className="track-space timeline-track-space audio-track-space" title="Coming soon — audio track editing is not available yet" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${rulerStepSeconds * timelineScale}px 100%` }}>
+                      {clips.length ? clips.map((clip) => {
+                        const asset = assets.find((item) => item.id === clip.assetId);
+                        const startSeconds = clip.timelineStartSample / clip.sampleRate;
+                        const durationSeconds = clip.timelineDurationSamples / clip.sampleRate;
+                        const clipName = asset?.name ?? 'Audio clip';
+                        return <div className="timeline-audio-clip" key={clip.id} role="img" aria-label={`${clipName}; audio editing unavailable`} title={`${clipName} · Coming soon — audio editing unavailable`} style={{ left: startSeconds * timelineScale, width: Math.max(8, durationSeconds * timelineScale) }}><span>{clipName}</span></div>;
+                      }) : <div className="empty-audio" title="Coming soon — audio track editing is not available yet"><span>Audio lane disabled</span></div>}
+                    </div>
+                  </div>;
+                })}
               </div>
-              <div className="timeline-track-rows" style={{ gridTemplateRows: timelineTrackRowTemplate }}>
-              {videoTracks.map((track) => {
-                const clips = track.clips.filter((clip): clip is VideoClip => clip.kind === 'video');
-                return <div className="track-row" key={track.id}>
-                  <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
-                    {clips.length ? clips.map((clip) => {
-                      const asset = assets.find((item) => item.id === clip.assetId);
-                      return <button
-                        className={`timeline-clip ${selectedTimelineClipId === clip.id ? 'is-selected' : ''}`}
-                        type="button"
-                        key={clip.id}
-                        style={{ left: clip.timelineStartFrame * timelinePixelsPerFrame, width: Math.max(4, clip.timelineDurationFrames * timelinePixelsPerFrame) }}
-                        aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
-                        aria-pressed={selectedTimelineClipId === clip.id}
-                        title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
-                        onClick={(event) => { event.stopPropagation(); selectTimelineClip(clip, event); }}
-                      >{asset?.name ?? 'Video clip'}</button>;
-                    }) : <div className="empty-track"><span>Select a source in Project media, then choose “Add selected source”</span></div>}
-                  </div>
-                </div>;
-              })}
-              {audioTracks.map((track) => {
-                const clips = track.clips.filter((clip): clip is AudioClip => clip.kind === 'audio');
-                return <div className="track-row audio-track" key={track.id}>
-                  <div className="track-space timeline-track-space audio-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}>
-                    {clips.length ? clips.map((clip) => {
-                      const asset = assets.find((item) => item.id === clip.assetId);
-                      const startFrame = clip.timelineStartSample / clip.sampleRate * frameRateValue;
-                      const durationFrames = clip.timelineDurationSamples / clip.sampleRate * frameRateValue;
-                      const clipName = asset?.name ?? 'Audio clip';
-                      return <div className="timeline-audio-clip" key={clip.id} role="img" aria-label={`${clipName}; audio editing unavailable`} title={clipName} style={{ left: startFrame * timelinePixelsPerFrame, width: Math.max(8, durationFrames * timelinePixelsPerFrame) }}><span>{clipName}</span></div>;
-                    }) : <div className="empty-audio" title="Audio editing is unavailable in this build"><span>Audio lane disabled</span></div>}
-                  </div>
-                </div>;
-              })}
-              </div>
-              <div ref={timelinePlayheadRef} className="timeline-playhead" style={{ transform: `translateX(${timelinePlayheadFrame * timelinePixelsPerFrame}px)` }}>
-                <button
-                  className="timeline-playhead-grab"
-                  type="button"
-                  role="slider"
-                  aria-label="Timeline playhead"
-                  aria-valuemin={0}
-                  aria-valuemax={timelineCanvasFrames}
-                  aria-valuenow={timelinePlayheadFrame}
-                  aria-valuetext={formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}
-                  onPointerDown={beginPlayheadDrag}
-                  onPointerMove={movePlayheadDrag}
-                  onPointerUp={endPlayheadDrag}
-                  onPointerCancel={endPlayheadDrag}
-                  onKeyDown={handlePlayheadKeyDown}
-                  onClick={(event) => event.stopPropagation()}
-                />
-              </div>
+              <div ref={timelinePlayheadRef} className="timeline-playhead" style={{ transform: `translateX(${timelinePlayheadFrame / frameRateValue * timelineScale}px)` }} />
             </div>
           </div>
         </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}

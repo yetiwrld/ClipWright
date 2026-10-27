@@ -61,24 +61,42 @@ describe('ClipWright foundation UI', () => {
     expect(container.querySelector('.editor-meta-badges')?.textContent).toContain('30 fps');
     expect(container.querySelector('.editor-meta-badges')?.textContent).toContain('Saved');
     expect(container.querySelectorAll('.timeline-note')).toHaveLength(0);
-    expect([...container.querySelectorAll('.timeline-track-layout > *')].map((element) => element.className)).toEqual([
+    expect([...container.querySelectorAll('.timeline-grid > *')].map((element) => element.className)).toEqual([
+      'timeline-corner',
+      'timeline-ruler-viewport',
       'timeline-track-header-column',
-      'timeline-scroll',
+      'timeline-track-area',
     ]);
-    const timelineScroller = container.querySelector('.timeline-scroll') as HTMLDivElement;
+    const timelineScroller = container.querySelector('.timeline-track-area') as HTMLDivElement;
     const trackHeaders = container.querySelector('.timeline-track-header-rows') as HTMLDivElement;
     fireEvent.scroll(timelineScroller, { target: { scrollTop: 42, scrollLeft: 50 } });
     expect(trackHeaders.style.transform).toBe('translateY(-42px)');
+    expect(container.querySelector('.timeline-grid')?.getAttribute('style')).toBeNull();
+    expect(container.querySelector('.timeline-ruler-viewport')?.getAttribute('aria-label')).toBe('Timeline ruler');
+    expect(screen.getByText('00:00:00:00')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Mute Video 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Lock Video 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Video 1' }));
+    expect(container.querySelector('.timeline-track-header-rows .track-row')?.classList.contains('is-track-hidden')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Show Video 1' })).toBeTruthy();
+    const trackDoc = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0];
+    expect(trackDoc.sequences[0].tracks[0]).toMatchObject({ muted: true, locked: true });
+    expect(container.querySelector('.timeline-track-header-rows .audio-track .track-header')?.getAttribute('title')).toContain('Coming soon');
     const startingTimelineHeight = Number(timelineResizer.getAttribute('aria-valuenow'));
     fireEvent.keyDown(timelineResizer, { key: 'ArrowDown' });
     expect(Number(timelineResizer.getAttribute('aria-valuenow'))).toBe(startingTimelineHeight - 16);
     expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe(String(startingTimelineHeight - 16));
-    fireEvent.change(screen.getByRole('slider', { name: 'Timeline zoom level' }), { target: { value: '2' } });
-    expect(screen.getByText('200%')).toBeTruthy();
-    expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('2');
+    const timelineZoom = screen.getByRole('slider', { name: 'Timeline zoom level' });
+    fireEvent.change(timelineZoom, { target: { value: '100' } });
+    expect(timelineZoom.getAttribute('max')).toBe('100');
+    expect(Number(window.localStorage.getItem('clipwright.workspace.timeline-px-per-second'))).toBeGreaterThan(0);
+    const majorTicks = [...container.querySelectorAll<HTMLElement>('.timeline-tick.is-major')].map((tick) => Number.parseFloat(tick.style.left));
+    expect(majorTicks.length).toBeGreaterThan(1);
+    expect(majorTicks.slice(1).every((position, index) => position - majorTicks[index] >= 80)).toBe(true);
+    expect(container.querySelector('.timeline-tick.is-minor em')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Fit project in timeline' }));
     expect(screen.getByText('100%')).toBeTruthy();
-    expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('1');
+    expect(Number(window.localStorage.getItem('clipwright.workspace.timeline-px-per-second'))).toBeGreaterThan(0);
 
     const shell = container.querySelector('.app-shell') as HTMLDivElement;
     expect(shell.classList.contains('is-editor-nav-collapsed')).toBe(true);
@@ -126,7 +144,8 @@ describe('ClipWright foundation UI', () => {
 
     fireEvent.click(screen.getByRole('button', { name: `Open ${project.name}` }));
     const audioClip = await screen.findByRole('img', { name: 'Long ambient soundscape.wav; audio editing unavailable' });
-    expect(audioClip.getAttribute('title')).toBe('Long ambient soundscape.wav');
+    expect(audioClip.getAttribute('title')).toContain('Long ambient soundscape.wav');
+    expect(audioClip.getAttribute('title')).toContain('Coming soon');
     expect(audioClip.classList.contains('timeline-audio-clip')).toBe(true);
     expect(container.querySelector('.empty-audio')).toBeNull();
   });
@@ -197,14 +216,20 @@ describe('ClipWright foundation UI', () => {
     const pixelsPerFrame = parseFloat((timelineClip as HTMLButtonElement).style.width) / 244;
     vi.spyOn(timelineCanvas, 'getBoundingClientRect').mockReturnValue({ left: 0 } as DOMRect);
     const playheadHandle = screen.getByRole('slider', { name: 'Timeline playhead' });
-    fireEvent.pointerDown(playheadHandle, { pointerId: 4, button: 0, clientX: Math.round(30 * pixelsPerFrame) });
-    fireEvent.pointerMove(playheadHandle, { pointerId: 4, button: 0, clientX: Math.round(90 * pixelsPerFrame) });
-    fireEvent.pointerUp(playheadHandle, { pointerId: 4, button: 0, clientX: Math.round(90 * pixelsPerFrame) });
+    fireEvent.pointerDown(playheadHandle, { pointerId: 4, button: 0, clientX: 30 * pixelsPerFrame });
+    fireEvent.pointerMove(playheadHandle, { pointerId: 4, button: 0, clientX: 90 * pixelsPerFrame });
+    fireEvent.pointerUp(playheadHandle, { pointerId: 4, button: 0, clientX: 90 * pixelsPerFrame });
     expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:03:00');
     expect(relinkedPreview.currentTime).toBeCloseTo(3, 1);
     fireEvent.keyDown(playheadHandle, { key: 'ArrowRight' });
     expect(playheadHandle.getAttribute('aria-valuenow')).toBe('91');
     expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:03:01');
+    const ruler = container.querySelector('.timeline-ruler-viewport') as HTMLDivElement;
+    fireEvent.pointerDown(ruler, { pointerId: 5, button: 0, clientX: 60 * pixelsPerFrame });
+    fireEvent.pointerMove(ruler, { pointerId: 5, button: 0, clientX: 120 * pixelsPerFrame });
+    fireEvent.pointerUp(ruler, { pointerId: 5, button: 0, clientX: 120 * pixelsPerFrame });
+    expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:04:00');
+    expect(relinkedPreview.currentTime).toBeCloseTo(4, 1);
     fireEvent.click(screen.getByRole('region', { name: 'Timeline tracks' }), { clientX: Math.round(60 * pixelsPerFrame) });
     expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:02:00');
     expect(relinkedPreview.currentTime).toBeCloseTo(2, 1);
