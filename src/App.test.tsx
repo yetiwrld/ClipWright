@@ -33,16 +33,17 @@ describe('ClipWright foundation UI', () => {
       'editor-media-panel',
       'editor-center',
       'properties-panel',
+      'timeline-resize-handle',
+      'timeline-panel',
     ]);
     expect([...container.querySelectorAll('.editor-center > *')].map((element) => element.className)).toEqual([
       'preview-stage',
       'preview-controls',
-      'timeline-resize-handle',
-      'timeline-panel',
     ]);
+    expect(container.querySelector('.timeline-panel')?.parentElement).toBe(container.querySelector('.editor-layout'));
     fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize timeline height' }), { key: 'ArrowUp' });
-    expect(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow')).toBe('256');
-    expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe('256');
+    expect(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow')).toBe('296');
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-height')).toBe('296');
     fireEvent.change(screen.getByRole('slider', { name: 'Timeline zoom level' }), { target: { value: '2' } });
     expect(screen.getByText('200%')).toBeTruthy();
     expect(window.localStorage.getItem('clipwright.workspace.timeline-zoom')).toBe('2');

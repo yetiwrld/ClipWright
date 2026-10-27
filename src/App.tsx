@@ -48,8 +48,8 @@ const TIMELINE_MIN_HEIGHT = 180;
 function readTimelineHeight() {
   try {
     const value = Number(window.localStorage.getItem(TIMELINE_HEIGHT_KEY));
-    return Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT ? value : 240;
-  } catch { return 240; }
+    return Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT ? value : 280;
+  } catch { return 280; }
 }
 
 function storeTimelineHeight(value: number) {
@@ -788,18 +788,18 @@ function EditorFoundation({
   const selectedClipTrack = selectedClip ? videoTracks.find((track) => track.clips.some((clip) => clip.id === selectedClip.id)) : null;
   const selectedClipAsset = selectedClip ? assets.find((asset) => asset.id === selectedClip.assetId) : null;
   const frameRateValue = sequence ? sequence.frameRate.numerator / sequence.frameRate.denominator : project?.frameRate ?? 30;
-  const editorCenterRef = useRef<HTMLDivElement>(null);
+  const editorLayoutRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
-  const timelineHeightRef = useRef(240);
-  const [editorCenterSize, setEditorCenterSize] = useState({ width: 0, height: 0 });
+  const timelineHeightRef = useRef(280);
+  const [editorLayoutSize, setEditorLayoutSize] = useState({ width: 0, height: 0 });
   const [timelineHeight, setTimelineHeight] = useState(readTimelineHeight);
   const [timelineZoom, setTimelineZoom] = useState(readTimelineZoom);
   timelineHeightRef.current = timelineHeight;
   const sequenceDurationFrames = sequence ? Math.max(sequence.durationFrames, sequenceDurationInFrames(sequence)) : 0;
   const timelineVisibleFrames = Math.max(sequenceDurationFrames, Math.ceil(frameRateValue * 20));
   const timelineHeaderWidth = 150;
-  const timelineViewportWidth = Math.max(350, editorCenterSize.width ? editorCenterSize.width - 26 : 574);
+  const timelineViewportWidth = Math.max(350, editorLayoutSize.width ? editorLayoutSize.width - 26 : Math.min(1_600, window.innerWidth - 260));
   const timelineAvailableWidth = Math.max(200, timelineViewportWidth - timelineHeaderWidth);
   const timelinePixelsPerFrame = Math.max(0.001, timelineAvailableWidth / timelineVisibleFrames * timelineZoom);
   const timelineCanvasFrames = Math.max(timelineVisibleFrames, Math.ceil(timelineAvailableWidth / timelinePixelsPerFrame));
@@ -809,7 +809,7 @@ function EditorFoundation({
   const tickSeconds = niceRulerIntervalSeconds(80 / Math.max(0.001, timelinePixelsPerFrame * frameRateValue));
   const tickInterval = Math.max(1, Math.round(frameRateValue * tickSeconds));
   const timelineTicks = Array.from({ length: Math.min(2_000, Math.floor(timelineCanvasFrames / tickInterval) + 1) }, (_, index) => index * tickInterval);
-  const timelineMaxHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(720, Math.floor((editorCenterSize.height || 600) * 0.7), (editorCenterSize.height || 600) - 336));
+  const timelineMaxHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(720, Math.floor((editorLayoutSize.height || 600) * 0.7), (editorLayoutSize.height || 600) - 246));
   const effectiveTimelineHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineHeight, timelineMaxHeight));
   const [startFrameDraft, setStartFrameDraft] = useState('0');
   const [sourceInDraft, setSourceInDraft] = useState('0');
@@ -822,10 +822,10 @@ function EditorFoundation({
   const [playbackError, setPlaybackError] = useState(false);
 
   useEffect(() => {
-    const element = editorCenterRef.current;
+    const element = editorLayoutRef.current;
     if (!element || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(([entry]) => {
-      if (entry) setEditorCenterSize({ width: Math.ceil(entry.contentRect.width), height: Math.ceil(entry.contentRect.height) });
+      if (entry) setEditorLayoutSize({ width: Math.ceil(entry.contentRect.width), height: Math.ceil(entry.contentRect.height) });
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -953,7 +953,7 @@ function EditorFoundation({
 
   return <section className="editor-foundation">
     <div className="editor-project-bar"><div><div className="eyebrow">EDITOR WORKSPACE</div><h1>{project?.name ?? 'No project selected'}</h1></div><div className="project-specs"><span>{project ? ratio : '—'}</span><span>{project ? frameRate : 'No sequence'}</span><span className="save-pill"><Check size={12} />Saved locally</span></div></div>
-    <div className="editor-layout">
+    <div className="editor-layout" ref={editorLayoutRef}>
       <aside className="editor-media-panel" aria-label="Project media">
         <div className="panel-title"><span>Project media</span><button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button></div>
         {assets.length ? <div className="media-asset-list" aria-label="Media assets">
@@ -975,7 +975,7 @@ function EditorFoundation({
         {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
         <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
       </aside>
-      <div className="editor-center" ref={editorCenterRef}>
+      <div className="editor-center">
         <div className="preview-stage"><div className="preview-frame">
           {source ? <video
             ref={videoRef}
@@ -1006,6 +1006,29 @@ function EditorFoundation({
           <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
           <span className="preview-quality" title="Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.">Browser preview</span>
         </div>
+
+      </div>
+      <aside className="properties-panel">
+        <div className="panel-title">Properties</div>
+        {selectedClip ? <div className="property-section selected-clip-properties">
+          <span className="panel-kicker">VIDEO CLIP</span>
+          <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
+          <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
+          <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
+          <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
+            <label htmlFor="clip-start-frame">Timeline start frame</label>
+            <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
+          </form>
+          {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
+            <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+            <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+            <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
+          </form>}
+          <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
+        </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
+        <div className="properties-divider"/>
+        <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
+      </aside>
         <div
           className="timeline-resize-handle"
           role="separator"
@@ -1074,28 +1097,6 @@ function EditorFoundation({
           <div className="timeline-note">Clip placement uses integer frames; source trims use stream ticks. Undo/redo history is session-only. Timeline playback and export are not included.</div>
           {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
         </div>
-      </div>
-      <aside className="properties-panel">
-        <div className="panel-title">Properties</div>
-        {selectedClip ? <div className="property-section selected-clip-properties">
-          <span className="panel-kicker">VIDEO CLIP</span>
-          <strong className="selected-clip-name">{selectedClipAsset?.name ?? 'Video clip'}</strong>
-          <div className="property-line"><span>Duration</span><strong>{selectedClip.timelineDurationFrames} frames</strong></div>
-          <div className="property-line"><span>Source range</span><strong>{selectedClip.sourceInTick}–{selectedClip.sourceOutTick} ticks</strong></div>
-          <form className="frame-position-form" onSubmit={(event) => { event.preventDefault(); applyStartFrame(); }}>
-            <label htmlFor="clip-start-frame">Timeline start frame</label>
-            <div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
-          </form>
-          {selectedClipAsset?.streams.video && <form className="source-trim-form" onSubmit={(event) => { event.preventDefault(); applySourceTrim(); }}>
-            <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
-            <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={selectedClipAsset.streams.video.durationTicks * selectedClipAsset.streams.video.timeBase.numerator / selectedClipAsset.streams.video.timeBase.denominator} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
-            <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
-          </form>}
-          <small>Trims are stored in source ticks; their timeline length rounds to sequence frames. Undo/redo is session-only.</small>
-        </div> : <div className="properties-empty"><Settings2 size={20} /><strong>Nothing selected</strong><span>Select a video clip on the timeline to view its frame position.</span></div>}
-        <div className="properties-divider"/>
-        <div className="property-section"><span className="panel-kicker">SEQUENCE</span><div className="property-line"><span>Aspect ratio</span><strong>{ratio}</strong></div><div className="property-line"><span>Frame rate</span><strong>{frameRate}</strong></div><div className="property-line"><span>Resolution</span><strong>{sequence?.width ?? 1920} × {sequence?.height ?? 1080}</strong></div><div className="property-line"><span>Duration</span><strong>{sequence?.durationFrames ?? 0} frames</strong></div><small>Settings are loaded from the validated project document.</small></div>
-      </aside>
     </div>
     <button className="subtle-back" onClick={onBack}><ArrowLeft size={14} />Back to projects</button>
   </section>;
