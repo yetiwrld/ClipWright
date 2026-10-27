@@ -42,14 +42,24 @@ type SessionMediaSource = { url: string; name: string };
 type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
 const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
+const TIMELINE_HEIGHT_EXPANDED_KEY = 'clipwright.workspace.timeline-height-expanded-v1';
 const TIMELINE_ZOOM_KEY = 'clipwright.workspace.timeline-zoom';
 const TIMELINE_MIN_HEIGHT = 180;
-const TIMELINE_DEFAULT_HEIGHT = 360;
+const TIMELINE_MAX_HEIGHT = 720;
+const TIMELINE_DEFAULT_HEIGHT = TIMELINE_MAX_HEIGHT;
 
 function readTimelineHeight() {
   try {
-    const value = Number(window.localStorage.getItem(TIMELINE_HEIGHT_KEY));
-    return Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT ? value : TIMELINE_DEFAULT_HEIGHT;
+    const rawValue = window.localStorage.getItem(TIMELINE_HEIGHT_KEY);
+    const value = Number(rawValue);
+    const isValid = Number.isFinite(value) && value >= TIMELINE_MIN_HEIGHT;
+    if (window.localStorage.getItem(TIMELINE_HEIGHT_EXPANDED_KEY) !== 'true') {
+      const expandedHeight = Math.max(isValid ? value : 0, TIMELINE_DEFAULT_HEIGHT);
+      window.localStorage.setItem(TIMELINE_HEIGHT_KEY, String(expandedHeight));
+      window.localStorage.setItem(TIMELINE_HEIGHT_EXPANDED_KEY, 'true');
+      return expandedHeight;
+    }
+    return isValid ? value : TIMELINE_DEFAULT_HEIGHT;
   } catch { return TIMELINE_DEFAULT_HEIGHT; }
 }
 
@@ -815,7 +825,7 @@ function EditorFoundation({
   const tickSeconds = niceRulerIntervalSeconds(80 / Math.max(0.001, timelinePixelsPerFrame * frameRateValue));
   const tickInterval = Math.max(1, Math.round(frameRateValue * tickSeconds));
   const timelineTicks = Array.from({ length: Math.min(2_000, Math.floor(timelineCanvasFrames / tickInterval) + 1) }, (_, index) => index * tickInterval);
-  const timelineMaxHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(720, Math.floor((editorLayoutSize.height || 600) * 0.7), (editorLayoutSize.height || 600) - 246));
+  const timelineMaxHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(TIMELINE_MAX_HEIGHT, Math.floor((editorLayoutSize.height || 600) * 0.7), (editorLayoutSize.height || 600) - 246));
   const effectiveTimelineHeight = Math.max(TIMELINE_MIN_HEIGHT, Math.min(timelineHeight, timelineMaxHeight));
   const [startFrameDraft, setStartFrameDraft] = useState('0');
   const [sourceInDraft, setSourceInDraft] = useState('0');

@@ -17,6 +17,7 @@ afterEach(() => {
 describe('ClipWright foundation UI', () => {
   it('creates and persists a project before opening the editor workspace', async () => {
     const { container } = render(<App />);
+    window.localStorage.setItem('clipwright.workspace.timeline-height', '296');
     fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
     fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Interview cut' } });
     fireEvent.change(screen.getByLabelText('Aspect ratio'), { target: { value: '9:16' } });
@@ -46,6 +47,7 @@ describe('ClipWright foundation UI', () => {
     expect(propertiesBody?.previousElementSibling?.textContent).toBe('Properties');
     expect(container.querySelector('.timeline-panel')?.parentElement).toBe(container.querySelector('.editor-layout'));
     expect(Number(screen.getByRole('separator', { name: 'Resize timeline height' }).getAttribute('aria-valuenow'))).toBeGreaterThanOrEqual(350);
+    expect(window.localStorage.getItem('clipwright.workspace.timeline-height-expanded-v1')).toBe('true');
     expect(container.querySelectorAll('.timeline-note')).toHaveLength(0);
     expect([...container.querySelectorAll('.timeline-track-layout > *')].map((element) => element.className)).toEqual([
       'timeline-track-header-column',
