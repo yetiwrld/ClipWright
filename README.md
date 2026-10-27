@@ -31,13 +31,13 @@ npm run build
 - Select a local video file to inspect browser-reported duration and dimensions and preview it with native browser decoding and in-app playback/seek/volume controls.
 - Keep picked media available only for the current page session using a revocable object URL. The project document stores a filename-only `browser-session` reference and browser-reported metadata, never the bytes or temporary URL; relinking is required after reload.
 - `.cwproject` path references are not auto-resolved or verified. Imported video references can be relinked through the file picker.
-- Append the selected in-session video source to an unlocked video track, reposition clips by integer sequence-frame index without overlap, trim source in/out points in stream ticks, remove clips, and persist the resulting project document. Source-duration-to-sequence mapping is rounded from browser-reported duration; undo/redo history is session-only and source preview remains separate from the timeline.
+- Append the selected in-session video source to an unlocked video track, reposition clips by integer sequence-frame index without overlap, trim source in/out points in stream ticks, remove clips, and persist the resulting project document. Click a clip to cue its source; clicking a lane moves the frame playhead, and browser preview seeking/playback follows the selected clip's source trim. Source-duration-to-sequence mapping is rounded from browser-reported duration; undo/redo history is session-only.
 - Keep the timeline across the full editor width in the lower workspace, beneath the preview area, with a resizable pane, persistent workspace height/zoom preferences, fit-project and zoom controls, frame-based ruler mapping, and horizontally sticky track headers.
 - Migrate the foundation’s earlier project-list records into empty v1 documents; preserve unreadable data until the user confirms recovery.
 - Open, rename, duplicate, favourite, archive/restore, search, and delete project entries.
 - Deletion is confirmed and removes only local project entries/documents; it never deletes media.
 - Dark and light themes, keyboard shortcuts (`Ctrl/Cmd+K`, `Ctrl/Cmd+N`), a working command palette, and task-centre status.
-- Honest, explicit unavailable states for timeline playback, audio editing, AI analysis, and export; full-frame preview, split/advanced edits, and audio-lane operations are not implied by the basic video timeline.
+- Honest, explicit unavailable states for sequence-wide playback across cuts, audio editing, AI analysis, and export; full-frame preview, split/advanced edits, and audio-lane operations are not implied by the basic video timeline.
 
 A `.cwproject` file is a portable JSON document that can be reopened by this foundation. It preserves supported project structure and references to source paths, but does not bundle media. Browser storage is interim and may be cleared; downloads are user-triggered snapshots rather than autosaved files, so do not rely on browser storage as the only copy of important work.
 

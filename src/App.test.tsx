@@ -104,7 +104,7 @@ describe('ClipWright foundation UI', () => {
 
     firstRender.unmount();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:clipwright-local-video');
-    render(<App />);
+    const { container } = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Open Local source test' }));
     expect(await screen.findByText('Relink required')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Relink' }));
@@ -118,7 +118,19 @@ describe('ClipWright foundation UI', () => {
     expect(relinkedDocument[0].assets[0].sourcePath).toBe('sample-relinked.mp4');
 
     fireEvent.click(screen.getByRole('button', { name: 'Add selected source' }));
-    expect(await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 0' })).toBeTruthy();
+    const timelineClip = await screen.findByRole('button', { name: 'Select sample-relinked.mp4 clip at frame 0' });
+    fireEvent.click(timelineClip);
+    expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:00:00');
+    Object.defineProperty(relinkedPreview, 'currentTime', { configurable: true, writable: true, value: 1 });
+    fireEvent.timeUpdate(relinkedPreview);
+    expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:01:00');
+    expect(parseFloat((container.querySelector('.timeline-playhead') as HTMLDivElement).style.left)).toBeGreaterThan(0);
+    const timelineCanvas = container.querySelector('.timeline-canvas') as HTMLDivElement;
+    const pixelsPerFrame = parseFloat((timelineClip as HTMLButtonElement).style.width) / 244;
+    vi.spyOn(timelineCanvas, 'getBoundingClientRect').mockReturnValue({ left: 0 } as DOMRect);
+    fireEvent.click(screen.getByRole('region', { name: 'Timeline tracks' }), { clientX: Math.round(60 * pixelsPerFrame) });
+    expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:02:00');
+    expect(relinkedPreview.currentTime).toBeCloseTo(2, 1);
     let edited = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
     expect(edited[0].sequences[0].durationFrames).toBe(244);
     expect(edited[0].sequences[0].tracks[0].clips[0]).toMatchObject({ timelineStartFrame: 0, timelineDurationFrames: 244 });
@@ -138,6 +150,10 @@ describe('ClipWright foundation UI', () => {
       expect(current.durationFrames).toBe(140);
       expect(current.tracks[0].clips[0]).toMatchObject({ sourceInTick: 0, sourceOutTick: 4_000_000, timelineStartFrame: 20, timelineDurationFrames: 120 });
     });
+    expect((screen.getByRole('slider', { name: 'Seek timeline clip preview' }) as HTMLInputElement).max).toBe('4');
+    Object.defineProperty(relinkedPreview, 'currentTime', { configurable: true, writable: true, value: 4 });
+    fireEvent.timeUpdate(relinkedPreview);
+    expect(screen.getByLabelText(/^Playhead at/).textContent).toBe('00:00:04:20');
     fireEvent.click(screen.getByRole('button', { name: 'Undo timeline change' }));
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[0].clips[0].sourceOutTick).toBe(8_125_000));
     fireEvent.click(screen.getByRole('button', { name: 'Redo timeline change' }));

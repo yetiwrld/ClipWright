@@ -784,7 +784,11 @@ function EditorFoundation({
   const audioTracks = sequence?.tracks.filter((track) => track.kind === 'audio') ?? [];
   const videoClips = videoTracks.flatMap((track) => track.clips.filter((clip): clip is VideoClip => clip.kind === 'video'));
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
+  const [timelinePlayheadFrame, setTimelinePlayheadFrame] = useState(0);
+  const [timelineSyncClipId, setTimelineSyncClipId] = useState<string | null>(null);
+  const pendingPreviewSeekRef = useRef<{ assetId: string; url: string | null; seconds: number } | null>(null);
   const selectedClip = videoClips.find((clip) => clip.id === selectedTimelineClipId) ?? null;
+  const timelineSyncClip = videoClips.find((clip) => clip.id === timelineSyncClipId) ?? null;
   const selectedClipTrack = selectedClip ? videoTracks.find((track) => track.clips.some((clip) => clip.id === selectedClip.id)) : null;
   const selectedClipAsset = selectedClip ? assets.find((asset) => asset.id === selectedClip.assetId) : null;
   const frameRateValue = sequence ? sequence.frameRate.numerator / sequence.frameRate.denominator : project?.frameRate ?? 30;
@@ -820,6 +824,14 @@ function EditorFoundation({
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.8);
   const [playbackError, setPlaybackError] = useState(false);
+  const timelineSyncTimeBase = assets.find((item) => item.id === timelineSyncClip?.assetId)?.streams.video?.timeBase;
+  const previewSeekMin = timelineSyncClip && timelineSyncTimeBase
+    ? timelineSyncClip.sourceInTick * timelineSyncTimeBase.numerator / timelineSyncTimeBase.denominator
+    : 0;
+  const previewSeekMax = timelineSyncClip && timelineSyncTimeBase
+    ? timelineSyncClip.sourceOutTick * timelineSyncTimeBase.numerator / timelineSyncTimeBase.denominator
+    : duration;
+  const previewSeekValue = Math.max(previewSeekMin, Math.min(currentTime, previewSeekMax || currentTime));
 
   useEffect(() => {
     const element = editorLayoutRef.current;
@@ -850,17 +862,130 @@ function EditorFoundation({
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume, source?.url]);
 
+  useEffect(() => {
+    if (!videoRef.current) return;
+    const rate = timelineSyncClip
+      ? timelineSyncClip.playbackRate.numerator / timelineSyncClip.playbackRate.denominator
+      : 1;
+    videoRef.current.playbackRate = rate;
+  }, [timelineSyncClip?.id, timelineSyncClip?.playbackRate.numerator, timelineSyncClip?.playbackRate.denominator, source?.url]);
+
   function seekBy(seconds: number) {
     const video = videoRef.current;
-    if (video && Number.isFinite(video.duration)) video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
+    if (!video || !Number.isFinite(video.duration)) return;
+    const minimum = timelineSyncClip ? previewSeekMin : 0;
+    const maximum = Math.min(video.duration, previewSeekMax || video.duration);
+    video.currentTime = Math.max(minimum, Math.min(maximum, video.currentTime + seconds));
   }
 
   function togglePlayback() {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
+      if (timelineSyncClip && video.currentTime >= previewSeekMax - 0.05) {
+        video.currentTime = previewSeekMin;
+        setCurrentTime(previewSeekMin);
+        setTimelinePlayheadFrame(timelineSyncClip.timelineStartFrame);
+      }
       void video.play().catch(() => { setPlaybackError(true); onPlaybackError(); });
     } else video.pause();
+  }
+
+  function seekTimelineFrame(requestedFrame: number) {
+    if (!sequence) return;
+    const frame = Math.max(0, Math.min(timelineCanvasFrames, Math.round(requestedFrame)));
+    setTimelinePlayheadFrame(frame);
+    const clip = videoClips.find((item) => frame >= item.timelineStartFrame && frame < item.timelineStartFrame + item.timelineDurationFrames);
+    if (!clip || !projectDocument) {
+      setTimelineSyncClipId(null);
+      pendingPreviewSeekRef.current = null;
+      videoRef.current?.pause();
+      return;
+    }
+
+    setSelectedTimelineClipId(clip.id);
+    setTimelineSyncClipId(clip.id);
+    const asset = assets.find((item) => item.id === clip.assetId);
+    const timeBase = asset?.streams.video?.timeBase;
+    const targetSource = sessionSources[mediaKey(projectDocument.id, clip.assetId)];
+    if (!timeBase) {
+      pendingPreviewSeekRef.current = null;
+      onSelectMedia(mediaKey(projectDocument.id, clip.assetId));
+      return;
+    }
+
+    const sourceInSeconds = clip.sourceInTick * timeBase.numerator / timeBase.denominator;
+    const playbackRate = clip.playbackRate.numerator / clip.playbackRate.denominator;
+    const sourceSeconds = sourceInSeconds + (frame - clip.timelineStartFrame) / frameRateValue * playbackRate;
+    pendingPreviewSeekRef.current = { assetId: clip.assetId, url: targetSource?.url ?? null, seconds: sourceSeconds };
+    onSelectMedia(mediaKey(projectDocument.id, clip.assetId));
+    if (!targetSource) return;
+    const video = videoRef.current;
+    if (source?.url === targetSource.url && video) {
+      video.pause();
+      video.playbackRate = playbackRate;
+      video.currentTime = Math.max(0, Math.min(metadataDuration || sourceSeconds, sourceSeconds));
+      setCurrentTime(video.currentTime);
+      if (video.readyState >= 1 && Number.isFinite(video.duration)) pendingPreviewSeekRef.current = null;
+    }
+  }
+
+  function handleTimelineClick(event: React.MouseEvent<HTMLDivElement>) {
+    const canvas = event.currentTarget.querySelector('.timeline-canvas');
+    if (!canvas) return;
+    const frame = (event.clientX - canvas.getBoundingClientRect().left) / timelinePixelsPerFrame;
+    seekTimelineFrame(frame);
+  }
+
+  function handlePreviewTimeUpdate(event: React.SyntheticEvent<HTMLVideoElement>) {
+    const video = event.currentTarget;
+    setCurrentTime(video.currentTime);
+    if (!timelineSyncClip || !sequence) return;
+    const syncAsset = assets.find((item) => item.id === timelineSyncClip.assetId);
+    const timeBase = syncAsset?.streams.video?.timeBase;
+    if (!timeBase) return;
+    const sourceInSeconds = timelineSyncClip.sourceInTick * timeBase.numerator / timeBase.denominator;
+    const sourceOutSeconds = timelineSyncClip.sourceOutTick * timeBase.numerator / timeBase.denominator;
+    const playbackRate = timelineSyncClip.playbackRate.numerator / timelineSyncClip.playbackRate.denominator;
+    const elapsedSourceSeconds = Math.max(0, video.currentTime - sourceInSeconds);
+    const frame = timelineSyncClip.timelineStartFrame + Math.round(elapsedSourceSeconds / playbackRate * frameRateValue);
+    const clipEndFrame = timelineSyncClip.timelineStartFrame + timelineSyncClip.timelineDurationFrames;
+    setTimelinePlayheadFrame(Math.min(clipEndFrame, frame));
+    if (video.currentTime >= sourceOutSeconds - Math.max(0.005, 0.5 / frameRateValue)) {
+      setTimelinePlayheadFrame(clipEndFrame);
+      video.pause();
+    }
+  }
+
+  function handlePreviewLoadedMetadata(event: React.SyntheticEvent<HTMLVideoElement>) {
+    const video = event.currentTarget;
+    const nextDuration = Number.isFinite(video.duration) ? video.duration : 0;
+    setDuration(nextDuration);
+    const pending = pendingPreviewSeekRef.current;
+    if (pending && pending.assetId === playableAsset?.id && (!pending.url || video.getAttribute('src') === pending.url)) {
+      video.playbackRate = timelineSyncClip
+        ? timelineSyncClip.playbackRate.numerator / timelineSyncClip.playbackRate.denominator
+        : 1;
+      video.currentTime = Math.max(0, Math.min(nextDuration || pending.seconds, pending.seconds));
+      setCurrentTime(video.currentTime);
+      pendingPreviewSeekRef.current = null;
+    }
+  }
+
+  function selectTimelineClip(clip: VideoClip, event?: React.MouseEvent<HTMLButtonElement>) {
+    setSelectedTimelineClipId(clip.id);
+    const bounds = event?.currentTarget.getBoundingClientRect();
+    const frame = event && bounds && bounds.width > 0
+      ? clip.timelineStartFrame + (event.clientX - bounds.left) / timelinePixelsPerFrame
+      : clip.timelineStartFrame;
+    seekTimelineFrame(frame);
+  }
+
+  function selectMediaSource(key: string) {
+    setTimelineSyncClipId(null);
+    pendingPreviewSeekRef.current = null;
+    if (videoRef.current) videoRef.current.playbackRate = 1;
+    onSelectMedia(key);
   }
 
   function addSelectedSourceToTimeline() {
@@ -968,7 +1093,7 @@ function EditorFoundation({
             const available = Boolean(sessionSources[key]);
             const isVideo = asset.kind === 'video' && Boolean(asset.streams.video);
             return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
-              <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && onSelectMedia(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
+              <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => isVideo && selectMediaSource(key)} disabled={!isVideo} title={isVideo ? asset.name : 'Audio and image previews are not available in this build'}>
                 <Film size={15} /><span className="media-asset-copy"><strong>{asset.name}</strong><small>{isVideo ? (available ? 'Ready in this session' : 'Relink required') : `${asset.kind} preview not supported`}</small></span>
               </button>
               {isVideo && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
@@ -990,24 +1115,27 @@ function EditorFoundation({
             playsInline
             preload="metadata"
             aria-label={`${playableAsset?.name ?? source.name} source preview`}
-            onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+            onLoadedMetadata={handlePreviewLoadedMetadata}
             onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
-            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onTimeUpdate={handlePreviewTimeUpdate}
             onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
-            onEnded={() => setIsPlaying(false)}
+            onEnded={() => {
+              setIsPlaying(false);
+              if (timelineSyncClip) setTimelinePlayheadFrame(timelineSyncClip.timelineStartFrame + timelineSyncClip.timelineDurationFrames);
+            }}
             onError={() => { setPlaybackError(true); onPlaybackError(); }}
           /> : <><Film size={35} strokeWidth={1.15} /><span>{playableAsset ? 'Relink this source to preview it in the current session' : assets.length ? 'No supported video source is available to preview' : 'Choose a video to start source preview'}</span></>}
           {playbackError && <span className="preview-error" role="status">Browser playback failed for this source.</span>}
           <div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/>
           <small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small>
         </div></div>
-        <div className="preview-controls" aria-label="Source preview controls">
+        <div className="preview-controls" aria-label={timelineSyncClip ? 'Timeline clip preview controls' : 'Source preview controls'}>
           <button className="transport-button" type="button" disabled={!source} title="Seek backward 5 seconds" aria-label="Seek backward 5 seconds" onClick={() => seekBy(-5)}><SkipBack size={15} /></button>
-          <button className="play-button" type="button" disabled={!source} aria-label={isPlaying ? 'Pause source preview' : 'Play source preview'} onClick={togglePlayback}>{isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+          <button className="play-button" type="button" disabled={!source} aria-label={isPlaying ? (timelineSyncClip ? 'Pause timeline clip preview' : 'Pause source preview') : (timelineSyncClip ? 'Play timeline clip preview' : 'Play source preview')} onClick={togglePlayback}>{isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
           <button className="transport-button" type="button" disabled={!source} title="Seek forward 5 seconds" aria-label="Seek forward 5 seconds" onClick={() => seekBy(5)}><SkipForward size={15} /></button>
           <span className="time-readout">{formatPlaybackTime(currentTime)} <i>/</i> {formatPlaybackTime(duration)}</span>
-          <input className="preview-seek" aria-label="Seek source video" type="range" min="0" max={duration || 1} step="0.05" value={Math.min(currentTime, duration || 0)} onChange={(event) => { if (videoRef.current) videoRef.current.currentTime = Number(event.target.value); }} disabled={!source || !duration} />
+          <input className="preview-seek" aria-label={timelineSyncClip ? 'Seek timeline clip preview' : 'Seek source video'} type="range" min={previewSeekMin} max={Math.max(previewSeekMin + 0.05, previewSeekMax || 1)} step="0.05" value={previewSeekValue} onChange={(event) => { if (videoRef.current) videoRef.current.currentTime = Number(event.target.value); }} disabled={!source || !duration} />
           <button className="volume-button" type="button" aria-label={volume > 0 ? 'Mute preview audio' : 'Unmute preview audio'} onClick={() => setVolume((value) => value > 0 ? 0 : 0.8)} disabled={!source}>{volume > 0 ? <Volume2 size={15} /> : <VolumeX size={15} />}</button>
           <input className="preview-volume" aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => setVolume(Number(event.target.value))} disabled={!source} />
           <span className="preview-quality" title="Metadata is browser-reported. Playback and seeking depend on installed browser codecs and are not frame-accurate.">Browser preview</span>
@@ -1055,7 +1183,7 @@ function EditorFoundation({
         ><span /></div>
         <div className="timeline-panel" style={{ height: effectiveTimelineHeight }}>
           <div className="timeline-heading">
-            <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
+            <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span>{sequence && <span className="timeline-timecode" aria-label={`Playhead at ${formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}`}>{formatRulerTime(timelinePlayheadFrame, sequence.frameRate)}</span>}</div>
             <div className="timeline-tools">
               <button type="button" aria-label="Undo timeline change" title="Undo timeline change" disabled={!canUndo} onClick={onUndo}><Undo2 size={14} /></button>
               <button type="button" aria-label="Redo timeline change" title="Redo timeline change" disabled={!canRedo} onClick={onRedo}><Redo2 size={14} /></button>
@@ -1082,7 +1210,7 @@ function EditorFoundation({
                 </div>)}
               </div>
             </div>
-            <div className="timeline-scroll" ref={timelineScrollRef} onScroll={syncTimelineHeaderScroll} role="region" aria-label="Timeline tracks">
+            <div className="timeline-scroll" ref={timelineScrollRef} onScroll={syncTimelineHeaderScroll} onClick={handleTimelineClick} role="region" aria-label="Timeline tracks">
               <div className="timeline-canvas" style={{ width: timelineContentWidth }}>
                 <div className="timeline-ruler" style={{ width: timelineContentWidth }}>
                   {timelineTicks.map((frame) => <span className="timeline-tick" key={frame} style={{ left: `${frame * timelinePixelsPerFrame}px` }}>{formatRulerTime(frame, sequence.frameRate)}</span>)}
@@ -1101,7 +1229,7 @@ function EditorFoundation({
                           aria-label={`Select ${asset?.name ?? 'video'} clip at frame ${clip.timelineStartFrame}`}
                           aria-pressed={selectedTimelineClipId === clip.id}
                           title={`${asset?.name ?? 'Video'} · frame ${clip.timelineStartFrame} · ${clip.timelineDurationFrames} frames`}
-                          onClick={() => setSelectedTimelineClipId(clip.id)}
+                          onClick={(event) => { event.stopPropagation(); selectTimelineClip(clip, event); }}
                         >{asset?.name ?? 'Video clip'}</button>;
                       }) : <div className="empty-track"><span>Select a source in Project media, then choose “Add selected source”</span></div>}
                     </div>
@@ -1110,10 +1238,11 @@ function EditorFoundation({
                 {audioTracks.map((track) => <div className="track-row audio-track" key={track.id}>
                   <div className="track-space timeline-track-space" style={{ width: timelineContentWidth, flex: '0 0 auto', backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px)', backgroundSize: `${tickInterval * timelinePixelsPerFrame}px 100%` }}><div className="empty-audio"><span>Audio lane editing unavailable</span></div></div>
                 </div>)}
+                <div className="timeline-playhead" aria-hidden="true" style={{ left: timelinePlayheadFrame * timelinePixelsPerFrame }} />
               </div>
             </div>
           </div> : <div className="timeline-empty">This project has no sequence to edit.</div>}
-          <div className="timeline-note">Clip placement uses integer frames; source trims use stream ticks. Undo/redo history is session-only. Timeline playback and export are not included.</div>
+          <div className="timeline-note">Placement uses sequence frames; trims use source ticks. Click a clip to cue it and click a lane to seek; preview playback follows the selected clip's trim. Undo/redo is session-only. Playback across cuts, audio mixing, and export are not included.</div>
           {audioClipCount > 0 && <div className="timeline-note">{audioClipCount} audio clip {audioClipCount === 1 ? 'entry is' : 'entries are'} preserved in the project document but not drawn or edited in this video-only slice.</div>}
         </div>
     </div>
