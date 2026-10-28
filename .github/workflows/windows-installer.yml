@@ -33,7 +33,17 @@ jobs:
         run: npm run test:desktop
 
       - name: Build Windows NSIS installer
-        run: npm run desktop:dist:win
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP 'windows-installer-build.log'
+          npm run desktop:dist:win *>&1 | Tee-Object -FilePath $logPath
+          $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -ne 0) {
+            $tail = (Get-Content $logPath -Tail 50) -join "`n"
+            $escaped = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows installer build failed::$escaped"
+            exit $buildExitCode
+          }
 
       - name: Smoke-test the packaged renderer and preload bridge
         shell: pwsh
@@ -47,6 +57,15 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "Packaged application smoke test failed with exit code $($process.ExitCode)."
           }
+
+      - name: Upload installer diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipWright-Windows-build-diagnostics
+          path: ${{ runner.temp }}/windows-installer-build.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload unsigned installer
         uses: actions/upload-artifact@v7
