@@ -214,15 +214,29 @@ function registerIpcHandlers() {
   });
 }
 
+async function writeSmokeReport(report) {
+  const reportPath = process.env.CLIPWRIGHT_SMOKE_REPORT_PATH;
+  if (process.env.CLIPWRIGHT_SMOKE_TEST !== '1' || !reportPath) return;
+  try {
+    await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    console.error('Desktop smoke test could not write its diagnostic report:', error);
+  }
+}
+
 function runRendererSmokeCheck(window) {
   const deadline = Date.now() + 60_000;
   let finished = false;
   let exportSmokeStarted = false;
+  let stage = 'checking renderer mount and preload IPC';
+  let smokeMeasurements = null;
   const check = async () => {
     if (finished) return;
     if (window.isDestroyed()) {
       finished = true;
-      console.error('Desktop smoke test failed: renderer window closed before it became ready.');
+      const error = 'Renderer window closed before it became ready.';
+      await writeSmokeReport({ pass: false, stage, error });
+      console.error('Desktop smoke test failed:', error);
       app.exit(1);
       return;
     }
@@ -239,22 +253,26 @@ function runRendererSmokeCheck(window) {
       if (state.title === 'ClipWright Studio' && state.mounted && state.info?.name && state.info?.platform) {
         if (!exportSmokeStarted) {
           exportSmokeStarted = true;
-          const measurements = await Promise.race([
+          stage = 'running deterministic WebM export and frame-identity smoke';
+          smokeMeasurements = await Promise.race([
             window.webContents.executeJavaScript(`import('./export-smoke.js').then(({ runDeterministicWebmSmoke }) => runDeterministicWebmSmoke())`),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Deterministic WebM export smoke timed out after 45 seconds.')), 45_000)),
           ]);
-          if (!measurements?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(measurements)}`);
-          if (process.env.CLIPWRIGHT_SMOKE_TEST === '1' && process.env.CLIPWRIGHT_SMOKE_REPORT_PATH) {
-            await fs.writeFile(process.env.CLIPWRIGHT_SMOKE_REPORT_PATH, `${JSON.stringify(measurements, null, 2)}\n`, 'utf8');
-          }
+          await writeSmokeReport(smokeMeasurements);
+          if (!smokeMeasurements?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(smokeMeasurements)}`);
           finished = true;
-          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(measurements)}`);
+          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(smokeMeasurements)}`);
           app.exit(0);
           return;
         }
       }
     } catch (error) {
       finished = true;
+      const message = error instanceof Error ? error.message : String(error);
+      const report = smokeMeasurements && typeof smokeMeasurements === 'object'
+        ? { ...smokeMeasurements, pass: false, stage, error: message }
+        : { pass: false, stage, error: message, stack: error instanceof Error ? error.stack : undefined };
+      await writeSmokeReport(report);
       console.error('Desktop smoke test failed:', error);
       app.exit(1);
       return;
@@ -262,7 +280,9 @@ function runRendererSmokeCheck(window) {
 
     if (Date.now() >= deadline) {
       finished = true;
-      console.error('Desktop smoke test failed: renderer mount, preload IPC, and deterministic export check did not complete within 60 seconds.');
+      const error = 'Renderer mount, preload IPC, and deterministic export check did not complete within 60 seconds.';
+      await writeSmokeReport({ pass: false, stage, error });
+      console.error('Desktop smoke test failed:', error);
       app.exit(1);
       return;
     }
