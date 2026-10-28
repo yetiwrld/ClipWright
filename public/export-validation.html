@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>ClipWright · WebM Export Validation</title>
+  <style>
+    :root { color-scheme: dark; font: 14px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; background: #171615; color: #eeece8; --panel: #211f1d; --border: #393632; --muted: #b0aaa2; --orange: #ff7418; }
+    * { box-sizing: border-box; }
+    body { max-width: 1040px; margin: 0 auto; padding: 36px 22px 60px; }
+    header { margin-bottom: 24px; }
+    .eyebrow { color: var(--orange); font-size: 11px; letter-spacing: .14em; font-weight: 700; }
+    h1 { margin: 8px 0; font-size: clamp(26px, 5vw, 38px); line-height: 1.15; }
+    header p, .note { max-width: 760px; color: var(--muted); }
+    .panel { margin-top: 18px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+    .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: end; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+    input, select, button { min-height: 40px; border: 1px solid var(--border); border-radius: 6px; color: inherit; background: #191817; font: inherit; }
+    input, select { width: 100%; padding: 0 10px; }
+    input[type=file] { padding: 6px; }
+    button { padding: 0 14px; cursor: pointer; background: #2a2724; }
+    button.primary { color: #20150e; background: var(--orange); border-color: var(--orange); font-weight: 700; }
+    button:disabled { opacity: .48; cursor: not-allowed; }
+    :focus-visible { outline: 3px solid #ff9e5e; outline-offset: 3px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 15px; }
+    #status { min-height: 1.5em; margin-top: 12px; color: var(--muted); }
+    .player-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr); gap: 18px; align-items: start; }
+    video { display: block; width: 100%; max-height: 460px; border-radius: 6px; background: #080808; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .stat { min-height: 74px; padding: 11px; border: 1px solid var(--border); border-radius: 6px; background: #191817; }
+    .stat dt { color: var(--muted); font-size: 11px; }
+    .stat dd { margin: 5px 0 0; font-size: 17px; font-variant-numeric: tabular-nums; }
+    pre { max-height: 330px; overflow: auto; padding: 13px; border: 1px solid var(--border); border-radius: 6px; background: #141312; color: #ddd8d2; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .note { margin: 14px 0 0; font-size: 12px; }
+    @media (max-width: 720px) { body { padding: 22px 14px 42px; } .form-grid, .player-grid { grid-template-columns: 1fr; } .panel { padding: 14px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="eyebrow">CLIPWRIGHT · LOCAL QA TOOL</div>
+    <h1>WebM export validation</h1>
+    <p>Play an exported file on the target device and record best-effort playback metrics. The file is read locally in this tab; it is not uploaded. This report does not certify visual quality or replace a manual review.</p>
+  </header>
+  <main>
+    <section class="panel" aria-labelledby="file-title">
+      <h2 id="file-title">1. Choose an export and its expected settings</h2>
+      <div class="form-grid">
+        <label>WebM file<input id="file" type="file" accept="video/webm,.webm"></label>
+        <label>Expected sequence duration (seconds)<input id="expected-duration" type="number" min="0.1" step="0.001" inputmode="decimal" placeholder="Optional"></label>
+        <label>Expected frame rate<select id="expected-fps"><option>24</option><option>25</option><option selected>30</option><option>50</option><option>60</option></select></label>
+      </div>
+      <div class="actions"><button id="run" class="primary" type="button" disabled>Run playback check</button><button id="download" type="button" disabled>Download JSON report</button></div>
+      <div id="status" role="status" aria-live="polite" aria-atomic="true">Choose a WebM file to begin.</div>
+    </section>
+    <section class="panel" aria-labelledby="playback-title">
+      <h2 id="playback-title">2. Play it through</h2>
+      <div class="player-grid">
+        <video id="video" controls playsinline preload="metadata" aria-label="Selected WebM export playback"></video>
+        <dl class="stats" aria-label="Playback measurements">
+          <div class="stat"><dt>Presented frame callbacks</dt><dd id="frames">—</dd></div>
+          <div class="stat"><dt>Decoded frames</dt><dd id="decoded">—</dd></div>
+          <div class="stat"><dt>Dropped frames</dt><dd id="dropped">—</dd></div>
+          <div class="stat"><dt>Observed cadence</dt><dd id="cadence">—</dd></div>
+          <div class="stat"><dt>File duration</dt><dd id="duration">—</dd></div>
+          <div class="stat"><dt>Dimensions</dt><dd id="dimensions">—</dd></div>
+        </dl>
+      </div>
+      <p class="note">Run the check from the beginning and let playback reach the end. Compare the picture and sound manually; pay attention to black frames, missing cuts, audio drift, and visible stutter. Browser frame counters are best-effort metrics and may differ by engine.</p>
+    </section>
+    <section class="panel" aria-labelledby="report-title">
+      <h2 id="report-title">3. Save the report with the test notes</h2>
+      <pre id="report" tabindex="0" aria-label="Export validation report">No playback report yet.</pre>
+    </section>
+  </main>
+  <script type="module" src="./export-validation.js"></script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+name: Windows desktop installer
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-installer:
+    name: Build and smoke-test unsigned Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run application tests
+        run: npm test
+
+      - name: Test desktop security helpers
+        run: npm run test:desktop
+
+      - name: Build Windows NSIS installer
+        run: npm run desktop:dist:win
+
+      - name: Smoke-test the packaged renderer and preload bridge
+        shell: pwsh
+        run: |
+          $env:CLIPWRIGHT_SMOKE_TEST = '1'
+          $appPath = Join-Path 'release\win-unpacked' 'ClipWright Studio.exe'
+          if (-not (Test-Path $appPath)) {
+            throw "Packaged application executable not found: $appPath"
+          }
+          $process = Start-Process -FilePath $appPath -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged application smoke test failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Upload unsigned installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipWright-Windows-unsigned-x64
+          path: release/ClipWright-Studio-Setup-*-x64.exe
+          if-no-files-found: error
+          retention-days: 14
