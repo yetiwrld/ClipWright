@@ -13,6 +13,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  delete (window as Window & { clipwright?: unknown }).clipwright;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -691,6 +692,44 @@ describe('ClipWright foundation UI', () => {
     expect(saved[0].sequences[0].width).toBe(1440);
   });
 
+  it('opens a managed desktop project, saves through its opaque handle, and lists recovery points', async () => {
+    const project = createProject('Managed desktop edit', '16:9', 30);
+    const document = createProjectDocument(project);
+    const contents = serializeProjectDocument(document);
+    const earlierDocument = { ...document, metadata: { ...document.metadata, name: 'Earlier managed version' } };
+    const earlierContents = serializeProjectDocument(earlierDocument);
+    const point: ClipWrightRecoveryPoint = { id: '1767225600000-12345678-1234-4234-8234-123456789abc.cwproject', modifiedAt: '2026-01-01T00:00:00.000Z', sizeBytes: earlierContents.length };
+    const desktopFiles = {
+      open: vi.fn().mockResolvedValue({ canceled: false, handle: 'session-handle', fileName: 'Managed desktop edit.cwproject', contents, documentId: document.id }),
+      saveAs: vi.fn(),
+      save: vi.fn().mockResolvedValue({ changed: false, recoveryId: null, documentId: document.id, fileName: 'Managed desktop edit.cwproject' }),
+      listRecoveryPoints: vi.fn().mockResolvedValue([point]),
+      readRecoveryPoint: vi.fn().mockResolvedValue(earlierContents),
+    };
+    const confirmRestore = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    Object.defineProperty(window, 'clipwright', { configurable: true, value: { projectFiles: desktopFiles } });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open project file' }));
+    expect(desktopFiles.open).toHaveBeenCalledOnce();
+    expect(await screen.findByText('Managed desktop edit')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save project' }));
+    await waitFor(() => expect(desktopFiles.save).toHaveBeenCalledWith({ handle: 'session-handle', contents }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project recovery' }));
+    expect(await screen.findByRole('dialog', { name: 'Restore a checkpoint' })).toBeTruthy();
+    expect(desktopFiles.listRecoveryPoints).toHaveBeenCalledWith('session-handle');
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    expect(confirmRestore).toHaveBeenCalledOnce();
+    await waitFor(() => expect(desktopFiles.readRecoveryPoint).toHaveBeenCalledWith({ handle: 'session-handle', recoveryId: point.id }));
+    await waitFor(() => expect(desktopFiles.save).toHaveBeenCalledWith({ handle: 'session-handle', contents: earlierContents }));
+    expect(await screen.findByText('Recovery checkpoint restored.')).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+      expect(saved[0].metadata.name).toBe('Earlier managed version');
+    });
+  });
+
   it('rejects an invalid project file without adding a partial project entry', async () => {
     const badContents = '{broken';
     const file = new File([badContents], 'broken.cwproject', { type: 'application/json' });
@@ -827,7 +866,7 @@ describe('ClipWright foundation UI', () => {
     const close = screen.getByRole('button', { name: 'Close help' });
     expect(window.document.activeElement).toBe(close);
     expect(dialog.textContent).toContain('Trim controls');
-    expect(dialog.textContent).toContain('AI analysis and desktop packaging are not included');
+    expect(dialog.textContent).toContain('AI analysis and deterministic offline export are not included');
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull());
     expect(window.document.activeElement).toBe(opener);

@@ -16,7 +16,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:desktop": "node --test electron/security.test.cjs",
+    "test:desktop": "node --test electron/security.test.cjs electron/projectFiles.test.cjs",
     "desktop:dev": "concurrently -k -s last \"vite --host 127.0.0.1 --port 5174 --strictPort\" \"wait-on tcp:127.0.0.1:5174 && cross-env CLIPWRIGHT_RENDERER_URL=http://127.0.0.1:5174 electron .\"",
     "desktop:preview": "npm run build && electron .",
     "desktop:smoke": "npm run build && cross-env CLIPWRIGHT_SMOKE_TEST=1 electron .",

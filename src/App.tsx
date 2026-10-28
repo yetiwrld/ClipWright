@@ -5,7 +5,7 @@ import {
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, ListFilter, Maximize2,
   MoreHorizontal, Minimize2, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut, Scissors, Magnet,
-  Eye, EyeOff, Lock, LockOpen,
+  Eye, EyeOff, History, Lock, LockOpen, Save,
   X, type LucideIcon,
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
@@ -24,6 +24,8 @@ import {
 
 type Workspace = 'home' | 'clipping' | 'editor';
 type Toast = { id: number; message: string; kind?: 'error' | 'success' | 'warning' };
+type ManagedProjectFile = { handle: string; fileName: string };
+type DiskSaveState = 'saving' | 'saved' | 'error';
 
 const workspaceItems: { id: Workspace; label: string; icon: LucideIcon }[] = [
   { id: 'home', label: 'Home', icon: Home },
@@ -154,6 +156,12 @@ export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('clipwright.theme') === 'light' ? 'light' : 'dark');
   const [sessionSources, setSessionSources] = useState<Record<string, SessionMediaSource>>({});
   const [timelineHistory, setTimelineHistory] = useState<Record<string, TimelineHistory>>({});
+  const [managedProjectFiles, setManagedProjectFiles] = useState<Record<string, ManagedProjectFile>>({});
+  const [diskSaveStates, setDiskSaveStates] = useState<Record<string, DiskSaveState>>({});
+  const [recoveryProjectId, setRecoveryProjectId] = useState<string | null>(null);
+  const [recoveryPoints, setRecoveryPoints] = useState<ClipWrightRecoveryPoint[]>([]);
+  const [isRestoringRecovery, setIsRestoringRecovery] = useState(false);
+  const saveQueuesRef = useRef(new Map<string, Promise<unknown>>());
   const sessionSourcesRef = useRef<Record<string, SessionMediaSource>>({});
   const [selectedMediaKey, setSelectedMediaKey] = useState<string | null>(null);
   const [pendingRelinkAssetId, setPendingRelinkAssetId] = useState<string | null>(null);
@@ -209,6 +217,36 @@ export default function App() {
   }, [documents, documentStorageWarning]);
 
   useEffect(() => {
+    const desktopFiles = window.clipwright?.projectFiles;
+    if (!desktopFiles) return;
+    const timers: number[] = [];
+    for (const document of documents) {
+      const linkedFile = managedProjectFiles[document.id];
+      if (!linkedFile) continue;
+      const timer = window.setTimeout(() => {
+        let contents: string;
+        try { contents = serializeProjectDocument(document); }
+        catch { setDiskSaveStates((current) => ({ ...current, [document.id]: 'error' })); return; }
+        setDiskSaveStates((current) => ({ ...current, [document.id]: 'saving' }));
+        const previous = saveQueuesRef.current.get(document.id) ?? Promise.resolve();
+        const operation = previous.catch(() => undefined).then(() => desktopFiles.save({ handle: linkedFile.handle, contents }));
+        saveQueuesRef.current.set(document.id, operation);
+        void operation.then((result) => {
+          if (saveQueuesRef.current.get(document.id) !== operation) return;
+          setDiskSaveStates((current) => ({ ...current, [document.id]: 'saved' }));
+          setManagedProjectFiles((current) => current[document.id]?.handle === linkedFile.handle
+            ? { ...current, [document.id]: { ...current[document.id], fileName: result.fileName } }
+            : current);
+        }).catch(() => {
+          if (saveQueuesRef.current.get(document.id) === operation) setDiskSaveStates((current) => ({ ...current, [document.id]: 'error' }));
+        });
+      }, 650);
+      timers.push(timer);
+    }
+    return () => timers.forEach(window.clearTimeout);
+  }, [documents, managedProjectFiles]);
+
+  useEffect(() => {
     try { window.localStorage.setItem('clipwright.theme', theme); }
     catch { /* Theme remains usable for this session even if browser storage is blocked. */ }
     document.documentElement.dataset.theme = theme;
@@ -227,21 +265,175 @@ export default function App() {
         event.preventDefault(); if (!persistenceWarning) setShowCreate(true);
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's' && workspace === 'editor' && activeProject) {
-        event.preventDefault(); downloadProjectFile(activeProject);
+        event.preventDefault(); void saveProjectFile(activeProject.id);
       }
       if (event.key === 'Escape') {
         setShowCreate(false); setShowSettings(false); setShowCommands(false); setShowTasks(false); setShowHelp(false);
+        if (!isRestoringRecovery) setRecoveryProjectId(null);
         setEditorFocusMode(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [persistenceWarning, workspace, activeProject, documents]);
+  }, [persistenceWarning, workspace, activeProject, documents, managedProjectFiles, isRestoringRecovery]);
 
   function notify(message: string, kind: Toast['kind'] = 'success') {
     const id = Date.now();
     setToast({ id, message, kind });
     if (kind !== 'error') window.setTimeout(() => setToast((current) => current?.id === id ? null : current), 3200);
+  }
+
+  function enqueueDesktopSave(projectId: string, handle: string, contents: string) {
+    const desktopFiles = window.clipwright?.projectFiles;
+    if (!desktopFiles) return Promise.reject(new Error('Managed project files are available only in the desktop app.'));
+    const previous = saveQueuesRef.current.get(projectId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(() => desktopFiles.save({ handle, contents }));
+    saveQueuesRef.current.set(projectId, operation);
+    return operation;
+  }
+
+  async function saveProjectFile(projectId: string) {
+    const desktopFiles = window.clipwright?.projectFiles;
+    if (!desktopFiles) {
+      const project = projects.find((entry) => entry.id === projectId);
+      if (project) downloadProjectFile(project);
+      return;
+    }
+    const projectDocument = documents.find((entry) => entry.id === projectId);
+    if (!projectDocument) { notify('No validated project document is available to save.', 'error'); return; }
+    const linkedFile = managedProjectFiles[projectId];
+    if (!linkedFile) { await saveProjectFileAs(projectId); return; }
+    try {
+      const contents = serializeProjectDocument(projectDocument);
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'saving' }));
+      const result = await enqueueDesktopSave(projectId, linkedFile.handle, contents);
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'saved' }));
+      notify(result.changed ? `Saved ${result.fileName}.` : `${result.fileName} is up to date.`);
+    } catch (error) {
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'error' }));
+      notify(error instanceof Error ? error.message : 'Could not save the project file.', 'error');
+    }
+  }
+
+  async function saveProjectFileAs(projectId: string) {
+    const desktopFiles = window.clipwright?.projectFiles;
+    const project = projects.find((entry) => entry.id === projectId);
+    if (!project) return;
+    if (!desktopFiles) { downloadProjectFile(project); return; }
+    const projectDocument = documents.find((entry) => entry.id === projectId);
+    if (!projectDocument) { notify('No validated project document is available to save.', 'error'); return; }
+    try {
+      const contents = serializeProjectDocument(projectDocument);
+      const result = await desktopFiles.saveAs({ contents, suggestedName: project.name });
+      if (result.canceled) return;
+      setManagedProjectFiles((current) => ({ ...current, [projectId]: { handle: result.handle, fileName: result.fileName } }));
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'saved' }));
+      notify(`Saved ${result.fileName}. Source media is referenced, not copied.`);
+    } catch (error) {
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'error' }));
+      notify(error instanceof Error ? error.message : 'Could not save the project file.', 'error');
+    }
+  }
+
+  function clearSessionMediaForProject(projectId: string, previousDocument: ProjectDocument | undefined) {
+    if (!previousDocument) return;
+    const nextSources = { ...sessionSourcesRef.current };
+    for (const asset of previousDocument.assets) {
+      const key = mediaKey(projectId, asset.id);
+      const source = nextSources[key];
+      if (source) URL.revokeObjectURL(source.url);
+      delete nextSources[key];
+    }
+    sessionSourcesRef.current = nextSources;
+    setSessionSources(nextSources);
+  }
+
+  async function openDesktopProject() {
+    const desktopFiles = window.clipwright?.projectFiles;
+    if (!desktopFiles) { projectFileInputRef.current?.click(); return; }
+    try {
+      const result = await desktopFiles.open();
+      if (result.canceled) return;
+      const incomingDocument = parseProjectDocument(result.contents);
+      if (incomingDocument.id !== result.documentId) throw new Error('The selected project id changed while it was being opened.');
+      const existingProject = projects.find((project) => project.id === incomingDocument.id);
+      if (existingProject && !window.confirm(`“${existingProject.name}” already exists in this workspace. Replace its browser copy with the version from ${result.fileName}? The file on disk will remain linked for autosave.`)) return;
+      const sequence = incomingDocument.sequences.find((item) => item.id === incomingDocument.projectSettings.defaultSequenceId);
+      if (!sequence) throw new Error('The project file does not contain its declared default sequence.');
+      const project: Project = {
+        id: incomingDocument.id,
+        name: incomingDocument.metadata.name,
+        createdAt: incomingDocument.metadata.createdAt,
+        updatedAt: incomingDocument.metadata.modifiedAt,
+        aspectRatio: aspectRatioOf(sequence.width, sequence.height),
+        frameRate: sequence.frameRate.numerator / sequence.frameRate.denominator,
+        archived: existingProject?.archived ?? false,
+        favorite: existingProject?.favorite ?? false,
+      };
+      clearSessionMediaForProject(project.id, documents.find((entry) => entry.id === project.id));
+      setProjects((current) => existingProject
+        ? current.map((entry) => entry.id === project.id ? project : entry)
+        : [project, ...current]);
+      setDocuments((current) => current.some((entry) => entry.id === incomingDocument.id)
+        ? current.map((entry) => entry.id === incomingDocument.id ? incomingDocument : entry)
+        : [...current, incomingDocument]);
+      setManagedProjectFiles((current) => ({ ...current, [project.id]: { handle: result.handle, fileName: result.fileName } }));
+      setDiskSaveStates((current) => ({ ...current, [project.id]: 'saved' }));
+      setActiveProjectId(project.id);
+      setWorkspace('editor');
+      notify(`Opened ${result.fileName}. Future changes will autosave to this file.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not open this project file.', 'error');
+    }
+  }
+
+  async function openRecoveryDialog(projectId: string) {
+    const link = managedProjectFiles[projectId];
+    const desktopFiles = window.clipwright?.projectFiles;
+    if (!link || !desktopFiles) { notify('Save this project to a managed project file before using recovery.', 'warning'); return; }
+    try {
+      const points = await desktopFiles.listRecoveryPoints(link.handle);
+      setRecoveryPoints(points);
+      setRecoveryProjectId(projectId);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not read project recovery points.', 'error');
+    }
+  }
+
+  async function restoreRecoveryPoint(point: ClipWrightRecoveryPoint) {
+    const projectId = recoveryProjectId;
+    const link = projectId ? managedProjectFiles[projectId] : null;
+    const desktopFiles = window.clipwright?.projectFiles;
+    if (!projectId || !link || !desktopFiles) return;
+    try {
+      const confirmed = window.confirm(`Restore the checkpoint from ${readableDate(point.modifiedAt)}? The current disk version will first be retained as another recovery point.`);
+      if (!confirmed) return;
+      setIsRestoringRecovery(true);
+      const restoredDocument = parseProjectDocument(await desktopFiles.readRecoveryPoint({ handle: link.handle, recoveryId: point.id }));
+      if (restoredDocument.id !== projectId) throw new Error('This recovery checkpoint belongs to a different project.');
+      const contents = serializeProjectDocument(restoredDocument);
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'saving' }));
+      await enqueueDesktopSave(projectId, link.handle, contents);
+      const sequence = restoredDocument.sequences.find((item) => item.id === restoredDocument.projectSettings.defaultSequenceId);
+      if (!sequence) throw new Error('The recovery checkpoint does not contain its declared default sequence.');
+      setDocuments((current) => current.map((entry) => entry.id === projectId ? restoredDocument : entry));
+      setProjects((current) => current.map((entry) => entry.id === projectId ? {
+        ...entry,
+        name: restoredDocument.metadata.name,
+        updatedAt: restoredDocument.metadata.modifiedAt,
+        aspectRatio: aspectRatioOf(sequence.width, sequence.height),
+        frameRate: sequence.frameRate.numerator / sequence.frameRate.denominator,
+      } : entry));
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'saved' }));
+      setRecoveryPoints(await desktopFiles.listRecoveryPoints(link.handle));
+      setRecoveryProjectId(null);
+      notify('Recovery checkpoint restored.');
+    } catch (error) {
+      setDiskSaveStates((current) => ({ ...current, [projectId]: 'error' }));
+      notify(error instanceof Error ? error.message : 'Could not restore this recovery checkpoint.', 'error');
+    } finally {
+      setIsRestoringRecovery(false);
+    }
   }
 
   function requestVideoImport(assetId?: string) {
@@ -619,7 +811,7 @@ export default function App() {
       notify('Resolve the project storage warning before opening a project file.', 'error');
       return;
     }
-    projectFileInputRef.current?.click();
+    void openDesktopProject();
   }
 
   async function importProjectFile(file: File | null) {
@@ -758,12 +950,17 @@ export default function App() {
             <button className="editor-back-button" type="button" onClick={() => navigate('home')} aria-label="Back to projects" title="Back to projects"><ArrowLeft size={17} /></button>
             <h1 className="editor-topbar-project" title={activeProject?.name ?? 'Editor'}>{activeProject?.name ?? 'Editor'}</h1>
             <div className="editor-meta-badges" aria-label="Project settings and save status">
-              <span>{editorAspectRatio}</span><span>{editorFrameRate}</span><span className="editor-saved"><Check size={12} />Saved</span>
+              <span>{editorAspectRatio}</span><span>{editorFrameRate}</span><span className={`editor-saved ${diskSaveStates[activeProjectId ?? ''] === 'error' ? 'editor-save-error' : ''}`} title={managedProjectFiles[activeProjectId ?? ''] ? managedProjectFiles[activeProjectId ?? ''].fileName : 'Stored in this browser profile'}>{diskSaveStates[activeProjectId ?? ''] === 'saving' ? <><Save size={12} />Saving…</> : diskSaveStates[activeProjectId ?? ''] === 'error' ? <><X size={12} />Disk save failed</> : <><Check size={12} />{managedProjectFiles[activeProjectId ?? ''] ? 'Saved to file' : 'Saved locally'}</>}</span>
             </div>
           </div> : <div className="brand-title"><span className="wordmark">ClipWright</span><span className="brand-studio">STUDIO</span><span className="version-tag">EARLY ACCESS</span></div>}
           <div className="topbar-actions">
             {workspace === 'home' && <div className="top-search"><Search size={15} /><input aria-label="Search projects" placeholder="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>⌘ K</kbd></div>}
-            {workspace === 'editor' && <button className="icon-button" type="button" aria-label="Download project backup" title="Download project backup (.cwproject) — source media is not included" onClick={() => { if (activeProject) downloadProjectFile(activeProject); }} disabled={!activeProject || !!persistenceWarning}><Download size={16} /></button>}
+            {workspace === 'editor' && <>
+              <button className="icon-button" type="button" aria-label="Save project" title={managedProjectFiles[activeProjectId ?? ''] ? 'Save project (Ctrl+S)' : 'Save project (choose a .cwproject location)'} onClick={() => { if (activeProject) void saveProjectFile(activeProject.id); }} disabled={!activeProject || !!persistenceWarning}><Save size={16} /></button>
+              <button className="icon-button" type="button" aria-label="Save project as" title="Save project as…" onClick={() => { if (activeProject) void saveProjectFileAs(activeProject.id); }} disabled={!activeProject || !!persistenceWarning}><FolderOpen size={16} /></button>
+              <button className="icon-button" type="button" aria-label="Project recovery" title="Browse project recovery checkpoints" onClick={() => { if (activeProject) void openRecoveryDialog(activeProject.id); }} disabled={!activeProject || !managedProjectFiles[activeProjectId ?? '']}><History size={16} /></button>
+              <button className="icon-button" type="button" aria-label="Download project backup" title="Download project backup (.cwproject) — source media is not included" onClick={() => { if (activeProject) downloadProjectFile(activeProject); }} disabled={!activeProject || !!persistenceWarning}><Download size={16} /></button>
+            </>}
             {workspace === 'editor' && <button className="icon-button focus-mode-toggle" type="button" aria-label="Enter focus mode" title="Focus mode — hide navigation and header" onClick={() => setEditorFocusMode(true)}><Maximize2 size={18} /></button>}
             <button className="icon-button" aria-label="Open command palette" title="Command palette (Ctrl+K)" onClick={() => setShowCommands(true)}><Command size={17} /></button>
             <button className="icon-button task-button" aria-label="Task centre" title="Task centre" onClick={() => setShowTasks(true)}><Clock3 size={17} /></button>
@@ -848,6 +1045,7 @@ export default function App() {
       <input ref={videoFileInputRef} hidden type="file" accept="video/*,.mp4,.m4v,.mov,.webm,.ogv,.avi" aria-label="Choose a local video file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importVideoFile(file); }} />
       <input ref={audioFileInputRef} hidden type="file" accept="audio/*,.aac,.aif,.aiff,.flac,.m4a,.mp3,.oga,.ogg,.opus,.wav,.weba" aria-label="Choose a local audio file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importAudioFile(file); }} />
       {showCreate && <CreateProjectDialog onClose={() => setShowCreate(false)} onCreate={createNewProject} />}
+      {recoveryProjectId && <RecoveryDialog projectName={projects.find((project) => project.id === recoveryProjectId)?.name ?? 'Project'} points={recoveryPoints} restoring={isRestoringRecovery} onRestore={(point) => { void restoreRecoveryPoint(point); }} onClose={() => { if (!isRestoringRecovery) setRecoveryProjectId(null); }} />}
       {showSettings && <SettingsDialog theme={theme} onTheme={setTheme} onClose={() => setShowSettings(false)} />}
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
       {showCommands && <CommandDialog inputRef={searchRef} onClose={() => setShowCommands(false)} actions={[
@@ -2441,10 +2639,23 @@ function ClippingFoundation({ onCreate }: { onCreate: () => void }) {
   return <section className="clipping-view"><div className="clipping-heading"><div><div className="eyebrow">AI-ASSISTED WORKFLOW</div><h1>Find the moments worth keeping.</h1><p>Turn long recordings into focused clips — with you in control of every cut.</p></div><div className="clipping-mark"><Sparkles size={23} /></div></div><div className="clipping-notice"><span className="notice-indicator" /><div><strong>Analysis is not available yet</strong><p>This build does not include a transcription model or highlight-analysis provider. Your media will not be uploaded or analyzed.</p></div><span className="planned-tag">FOUNDATION</span></div><div className="clipping-steps"><div className="step-card"><span className="step-number">01</span><div className="step-icon"><FolderOpen size={19} /></div><h3>Preview your source</h3><p>Import a local video from the Editor for browser-based metadata and preview.</p><span className="step-state">Available in Editor</span></div><div className="step-connector" /><div className="step-card"><span className="step-number">02</span><div className="step-icon"><Sparkles size={19} /></div><h3>Review moments</h3><p>Check transcript-backed suggestions and why they were selected.</p><span className="step-state">Provider required</span></div><div className="step-connector" /><div className="step-card"><span className="step-number">03</span><div className="step-icon"><Clapperboard size={19} /></div><h3>Edit & export</h3><p>Refine the cut in the editor and record a browser-native WebM export.</p><span className="step-state">WebM available · offline render upcoming</span></div></div><div className="clipping-footer"><div><span className="footer-label">DESIGNED FOR PRIVACY</span><strong>Local-first, by default</strong><span> Cloud processing will always require explicit consent.</span></div><button className="button button-secondary" onClick={onCreate}><Plus size={15} />Create a project</button></div></section>;
 }
 
+function RecoveryDialog({ projectName, points, restoring, onRestore, onClose }: { projectName: string; points: ClipWrightRecoveryPoint[]; restoring: boolean; onRestore: (point: ClipWrightRecoveryPoint) => void; onClose: () => void }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialogFocusTrap<HTMLElement>(() => closeButtonRef.current);
+  return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !restoring) onClose(); }}>
+    <section ref={dialogRef} tabIndex={-1} className="dialog recovery-dialog" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
+      <div className="dialog-head"><div className="dialog-icon"><History size={17} /></div><button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} disabled={restoring} aria-label="Close recovery"><X size={17} /></button></div>
+      <div className="eyebrow">PROJECT RECOVERY</div><h2 id="recovery-title">Restore a checkpoint</h2><p className="dialog-copy">Choose an earlier saved version of “{projectName}”. The current disk file is checkpointed before it is replaced.</p>
+      {points.length ? <div className="recovery-list">{points.map((point) => <div className="recovery-row" key={point.id}><div><strong>{new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(point.modifiedAt))}</strong><span>{new Intl.NumberFormat().format(point.sizeBytes)} bytes</span></div><button className="button button-secondary button-small" type="button" onClick={() => onRestore(point)} disabled={restoring}>Restore</button></div>)}</div> : <div className="recovery-empty"><History size={18} /><span>No earlier checkpoints yet. A checkpoint is created when the project file changes.</span></div>}
+      <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose} disabled={restoring}>Close</button></div>
+    </section>
+  </div>;
+}
+
 function SettingsDialog({ theme, onTheme, onClose }: { theme: 'dark' | 'light'; onTheme: (value: 'dark' | 'light') => void; onClose: () => void }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useDialogFocusTrap<HTMLElement>(() => closeButtonRef.current);
-  return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} tabIndex={-1} className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="dialog-head"><div className="dialog-icon"><Settings2 size={17} /></div><button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">Settings</h2><p className="dialog-copy">Adjust this workspace. Preferences are saved on this device.</p><div className="setting-row"><div><strong>Appearance</strong><span>Choose a theme for the studio.</span></div><div className="theme-toggle"><button className={theme === 'dark' ? 'active' : ''} onClick={() => onTheme('dark')}><Moon size={14} />Dark</button><button className={theme === 'light' ? 'active' : ''} onClick={() => onTheme('light')}><Sun size={14} />Light</button></div></div><div className="setting-row"><div><strong>Storage model</strong><span>Project index and documents in browser local storage</span></div><span className="setting-value">Local</span></div><div className="setting-row"><div><strong>Application version</strong><span>Foundation build · 0.1.0</span></div><span className="setting-value">Early access</span></div><div className="settings-disclaimer">A Windows desktop shell, managed project files, autosave, and recovery are not included in this first increment.</div><div className="dialog-actions"><button className="button button-primary" onClick={onClose}>Done</button></div></section></div>;
+  return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} tabIndex={-1} className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="dialog-head"><div className="dialog-icon"><Settings2 size={17} /></div><button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">Settings</h2><p className="dialog-copy">Adjust this workspace. Preferences are saved on this device.</p><div className="setting-row"><div><strong>Appearance</strong><span>Choose a theme for the studio.</span></div><div className="theme-toggle"><button className={theme === 'dark' ? 'active' : ''} onClick={() => onTheme('dark')}><Moon size={14} />Dark</button><button className={theme === 'light' ? 'active' : ''} onClick={() => onTheme('light')}><Sun size={14} />Light</button></div></div><div className="setting-row"><div><strong>Storage model</strong><span>Managed .cwproject files autosave in the desktop app; browser builds use local storage</span></div><span className="setting-value">Local</span></div><div className="setting-row"><div><strong>Application version</strong><span>Foundation build · 0.1.0</span></div><span className="setting-value">Early access</span></div><div className="settings-disclaimer">Managed project files use atomic saves and retain up to ten recovery checkpoints per project. Source media is referenced, not copied.</div><div className="dialog-actions"><button className="button button-primary" onClick={onClose}>Done</button></div></section></div>;
 }
 
 function HelpDialog({ onClose }: { onClose: () => void }) {
@@ -2459,7 +2670,7 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
         <section className="help-shortcut-group"><h3>Workspace</h3><dl>
           <div><dt>Command palette</dt><dd><kbd>Ctrl/Cmd</kbd><kbd>K</kbd></dd></div>
           <div><dt>New project</dt><dd><kbd>Ctrl/Cmd</kbd><kbd>N</kbd></dd></div>
-          <div><dt>Project backup (Editor)</dt><dd><kbd>Ctrl/Cmd</kbd><kbd>S</kbd></dd></div>
+          <div><dt>Save project (Editor)</dt><dd><kbd>Ctrl/Cmd</kbd><kbd>S</kbd></dd></div>
         </dl></section>
         <section className="help-shortcut-group"><h3>Timeline</h3><dl>
           <div><dt>Play or pause</dt><dd><kbd>Space</kbd></dd></div>
@@ -2480,7 +2691,7 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
           <div><dt>Jump to trim limit</dt><dd><kbd>Home</kbd><kbd>End</kbd></dd></div>
         </dl></section>
       </div>
-      <p className="help-disclaimer">ClipWright is a browser-based editing foundation. AI analysis and desktop packaging are not included, and export quality has not been validated.</p>
+      <p className="help-disclaimer">The Windows preview supports managed project saves and recovery checkpoints. AI analysis and deterministic offline export are not included; browser WebM export quality is unverified.</p>
     </section>
   </div>;
 }

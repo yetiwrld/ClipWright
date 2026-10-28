@@ -1,7 +1,15 @@
-const { app, BrowserWindow, ipcMain, protocol, session } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, protocol, session } = require('electron');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { isTrustedRendererUrl, resolveLocalAssetPath } = require('./security.cjs');
+const {
+  listRecoveryPoints,
+  parseProjectEnvelope,
+  readProjectFile,
+  readRecoveryPoint,
+  writeProjectFile,
+} = require('./projectFiles.cjs');
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'clipwright';
@@ -91,17 +99,118 @@ async function handleAppRequest(request) {
   }
 }
 
+const projectFileHandles = new Map();
+
+function assertTrustedIpcSender(event) {
+  if (event.senderFrame !== event.sender.mainFrame || !isTrustedRendererUrl(event.senderFrame.url, { devServerOrigin, scheme: APP_SCHEME, host: APP_HOST })) {
+    throw new Error('Untrusted renderer');
+  }
+}
+
+function getWindowForSender(event) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window || window.isDestroyed()) throw new Error('The editor window is no longer available.');
+  return window;
+}
+
+function recoveryRoot() {
+  return path.join(app.getPath('userData'), 'project-recovery');
+}
+
+function safeProjectFilename(name) {
+  const safeName = String(name || 'ClipWright project')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+    .replace(/[. ]+$/g, '')
+    .trim() || 'ClipWright project';
+  return /\.cwproject$/i.test(safeName) ? safeName : `${safeName}.cwproject`;
+}
+
+function registerProjectHandle(event, filePath, projectId, contentHash) {
+  const handle = crypto.randomUUID();
+  projectFileHandles.set(handle, { filePath, projectId, contentHash, webContentsId: event.sender.id });
+  event.sender.once('destroyed', () => projectFileHandles.delete(handle));
+  return handle;
+}
+
+function getProjectHandle(event, handle) {
+  assertTrustedIpcSender(event);
+  const linkedFile = typeof handle === 'string' ? projectFileHandles.get(handle) : null;
+  if (!linkedFile || linkedFile.webContentsId !== event.sender.id) throw new Error('This project file is no longer linked. Use Save As to choose a file.');
+  return linkedFile;
+}
+
 function registerIpcHandlers() {
   ipcMain.handle('app:get-info', (event) => {
-    if (event.senderFrame !== event.sender.mainFrame || !isTrustedRendererUrl(event.senderFrame.url, { devServerOrigin, scheme: APP_SCHEME, host: APP_HOST })) {
-      throw new Error('Untrusted renderer');
-    }
+    assertTrustedIpcSender(event);
     return {
       name: app.getName(),
       version: app.getVersion(),
       platform: process.platform,
       packaged: app.isPackaged,
     };
+  });
+
+  ipcMain.handle('project-files:open', async (event) => {
+    assertTrustedIpcSender(event);
+    const result = await dialog.showOpenDialog(getWindowForSender(event), {
+      title: 'Open ClipWright project',
+      properties: ['openFile'],
+      filters: [{ name: 'ClipWright project', extensions: ['cwproject'] }, { name: 'JSON project', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return { canceled: true };
+    const filePath = result.filePaths[0];
+    const project = await readProjectFile(filePath);
+    const handle = registerProjectHandle(event, filePath, project.documentId, project.contentHash);
+    return { canceled: false, handle, fileName: path.basename(filePath), contents: project.contents, documentId: project.documentId };
+  });
+
+  ipcMain.handle('project-files:save-as', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (!payload || typeof payload.contents !== 'string') throw new Error('Project contents are required.');
+    const document = parseProjectEnvelope(payload.contents);
+    const result = await dialog.showSaveDialog(getWindowForSender(event), {
+      title: 'Save ClipWright project',
+      defaultPath: safeProjectFilename(payload.suggestedName || document.metadata.name),
+      filters: [{ name: 'ClipWright project', extensions: ['cwproject'] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    const filePath = /\.cwproject$/i.test(result.filePath) ? result.filePath : `${result.filePath}.cwproject`;
+    const saved = await writeProjectFile({ filePath, contents: payload.contents, recoveryRoot: recoveryRoot(), expectedId: document.id });
+    const handle = registerProjectHandle(event, filePath, saved.documentId, saved.contentHash);
+    const { contentHash, ...publicSaved } = saved;
+    return { canceled: false, handle, fileName: path.basename(filePath), ...publicSaved };
+  });
+
+  ipcMain.handle('project-files:save', async (event, payload) => {
+    if (!payload || typeof payload.contents !== 'string') throw new Error('Project contents are required.');
+    const linkedFile = getProjectHandle(event, payload.handle);
+    const saved = await writeProjectFile({
+      filePath: linkedFile.filePath,
+      contents: payload.contents,
+      recoveryRoot: recoveryRoot(),
+      expectedId: linkedFile.projectId,
+      expectedCurrentId: linkedFile.projectId,
+      expectedCurrentHash: linkedFile.contentHash,
+    });
+    linkedFile.contentHash = saved.contentHash;
+    const { contentHash, ...publicSaved } = saved;
+    return { ...publicSaved, fileName: path.basename(linkedFile.filePath) };
+  });
+
+  ipcMain.handle('project-files:list-recovery', (event, handle) => {
+    const linkedFile = getProjectHandle(event, handle);
+    return listRecoveryPoints({ filePath: linkedFile.filePath, recoveryRoot: recoveryRoot() });
+  });
+
+  ipcMain.handle('project-files:read-recovery', (event, payload) => {
+    if (!payload || typeof payload.recoveryId !== 'string') throw new Error('Recovery checkpoint id is required.');
+    const linkedFile = getProjectHandle(event, payload.handle);
+    return readRecoveryPoint({
+      filePath: linkedFile.filePath,
+      recoveryRoot: recoveryRoot(),
+      recoveryId: payload.recoveryId,
+      expectedId: linkedFile.projectId,
+    });
   });
 }
 
@@ -172,6 +281,12 @@ function createWindow() {
     if (!isTrustedRendererUrl(url, { devServerOrigin, scheme: APP_SCHEME, host: APP_HOST })) event.preventDefault();
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return;
+    for (const [handle, linkedFile] of projectFileHandles) {
+      if (linkedFile.webContentsId === window.webContents.id) projectFileHandles.delete(handle);
+    }
+  });
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (smokeTest && isMainFrame) {
       console.error(`Desktop smoke test failed loading ${validatedURL}: ${errorDescription} (${errorCode}).`);
