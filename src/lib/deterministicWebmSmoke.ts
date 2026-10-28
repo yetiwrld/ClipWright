@@ -1,6 +1,6 @@
 import { ALL_FORMATS, BufferSource, CanvasSink, Input } from 'mediabunny';
 import { areExportFrameCountsExact, createSequenceExportPlan, encodeDeterministicWebm } from './deterministicWebmExport';
-import { drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
+import { CANVAS_TIMESTAMP_EPSILON_SECONDS, drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
 import { validateProjectDocument } from './projectDocument';
 import type { MediaAsset, ProjectDocument, TimelineClip, Track } from './projectDocument';
 
@@ -23,6 +23,7 @@ function drawIdentityFrame(context: CanvasRenderingContext2D, sourceId: 'A' | 'B
 }
 
 type FrameIdentity = { sourceId: 'A' | 'B' | null; frameIndex: number | null; isGap: boolean };
+type TimedFrameIdentity = { timestampSeconds: number; identity: FrameIdentity };
 
 function readIdentity(canvas: HTMLCanvasElement | OffscreenCanvas): FrameIdentity {
   const context = canvas.getContext('2d');
@@ -112,17 +113,21 @@ function makeTimelineIdentityFixture() {
   return { project: validation.value, tracks: sequence.tracks, clips: sequence.tracks.flatMap((item) => item.clips), frameCount: sequence.durationFrames };
 }
 
-async function inspectFrameIdentities(buffer: ArrayBuffer, reportProgress: SmokeProgress): Promise<FrameIdentity[]> {
-  reportProgress('opening finalized output for frame-identity decode');
+async function inspectFrameIdentities(
+  buffer: ArrayBuffer,
+  reportProgress: SmokeProgress,
+  description: string,
+): Promise<TimedFrameIdentity[]> {
+  reportProgress(`opening ${description} for frame-identity decode`);
   const input = new Input({ source: new BufferSource(buffer), formats: ALL_FORMATS });
   try {
     const track = await input.getPrimaryVideoTrack();
     if (!track) throw new Error('The identity-test output has no video track.');
     const sink = new CanvasSink(track, { alpha: false, poolSize: 1 });
-    const identities: FrameIdentity[] = [];
+    const identities: TimedFrameIdentity[] = [];
     for await (const frame of sink.canvases()) {
-      identities.push(readIdentity(frame.canvas));
-      if (identities.length % 10 === 0 || identities.length === 1) reportProgress(`decoded ${identities.length} output frame identities`);
+      identities.push({ timestampSeconds: frame.timestamp, identity: readIdentity(frame.canvas) });
+      if (identities.length % 10 === 0 || identities.length === 1) reportProgress(`decoded ${identities.length} ${description} frame identities`);
     }
     return identities;
   } finally {
@@ -134,6 +139,10 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
   const sourceA = await encodeIdentitySource('A', reportProgress);
   const sourceB = await encodeIdentitySource('B', reportProgress);
   const sourceBuffers = new Map<string, ArrayBuffer>([['A', sourceA], ['B', sourceB]]);
+  const sourceFrameIdentities = new Map<string, TimedFrameIdentity[]>();
+  for (const [sourceId, sourceBuffer] of sourceBuffers) {
+    sourceFrameIdentities.set(sourceId, await inspectFrameIdentities(sourceBuffer, reportProgress, `synthetic source ${sourceId}`));
+  }
   const readers = new Map<string, Awaited<ReturnType<typeof openVideoFrameReader>>>();
   const { tracks, clips, frameCount } = makeTimelineIdentityFixture();
   const plan = createSequenceExportPlan(frameCount, TEST_RATE);
@@ -172,16 +181,22 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       },
     });
     reportProgress('finalized timeline output; decoding frame identities');
-    const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress);
+    const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress, 'finalized timeline output');
     const expectedFrameIdentities: FrameIdentity[] = Array.from({ length: frameCount }, (_, frameIndex) => {
       const timestamp = plan.timestampSeconds(frameIndex);
       const clip = selectActiveVideoClip(clips, tracks, timestamp);
       if (!clip || !sourceBuffers.has(clip.sourceId)) return { sourceId: null, frameIndex: null, isGap: true };
-      const sourceFrameIndex = Math.floor(sourceTimeForTimelineClip(clip, timestamp) * TEST_RATE.numerator + 1e-7);
-      return { sourceId: clip.sourceId as 'A' | 'B', frameIndex: sourceFrameIndex, isGap: false };
+      const sourceTimestamp = sourceTimeForTimelineClip(clip, timestamp);
+      const sourceFrames = sourceFrameIdentities.get(clip.sourceId) ?? [];
+      let selectedSourceFrame: TimedFrameIdentity | null = null;
+      for (const sourceFrame of sourceFrames) {
+        if (sourceFrame.timestampSeconds <= sourceTimestamp + CANVAS_TIMESTAMP_EPSILON_SECONDS) selectedSourceFrame = sourceFrame;
+        else break;
+      }
+      return selectedSourceFrame?.identity ?? { sourceId: null, frameIndex: null, isGap: true };
     });
     const mismatches = expectedFrameIdentities.flatMap((expected, index) => {
-      const actual = fileFrameIdentities[index];
+      const actual = fileFrameIdentities[index]?.identity;
       if (actual && actual.isGap === expected.isGap && actual.sourceId === expected.sourceId && actual.frameIndex === expected.frameIndex) return [];
       return [{ outputFrame: index, expected, actual: actual ?? null }];
     });

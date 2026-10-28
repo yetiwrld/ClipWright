@@ -6,7 +6,7 @@ import { clipEnd } from './timelineOperations';
 export type TimelineCanvas = HTMLCanvasElement | OffscreenCanvas;
 
 // Encoder packet timestamps are rounded to microseconds; treat that representation noise as an exact boundary.
-const CANVAS_TIMESTAMP_EPSILON_SECONDS = 1 / 1_000_000;
+export const CANVAS_TIMESTAMP_EPSILON_SECONDS = 1 / 1_000_000;
 type TimestampedCanvasIterator = AsyncIterator<WrappedCanvas, void, unknown>;
 
 /** A look-ahead cursor over presentation-order frames, exposed separately for deterministic boundary tests. */
