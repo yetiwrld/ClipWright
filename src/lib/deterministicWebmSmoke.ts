@@ -8,6 +8,8 @@ const TEST_RATE = { numerator: 30, denominator: 1 };
 const TEST_WIDTH = 320;
 const TEST_HEIGHT = 180;
 const IDENTITY_BIT_COUNT = 6;
+type SmokeProgress = (stage: string) => void;
+const reportNoop: SmokeProgress = () => undefined;
 
 function drawIdentityFrame(context: CanvasRenderingContext2D, sourceId: 'A' | 'B', frameIndex: number) {
   context.fillStyle = '#202020';
@@ -45,7 +47,8 @@ function readIdentity(canvas: HTMLCanvasElement | OffscreenCanvas): FrameIdentit
   return { sourceId, frameIndex, isGap: false };
 }
 
-async function encodeIdentitySource(sourceId: 'A' | 'B') {
+async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokeProgress) {
+  reportProgress(`encoding source ${sourceId} identity footage`);
   const canvas = document.createElement('canvas');
   canvas.width = TEST_WIDTH;
   canvas.height = TEST_HEIGHT;
@@ -109,25 +112,28 @@ function makeTimelineIdentityFixture() {
   return { project: validation.value, tracks: sequence.tracks, clips: sequence.tracks.flatMap((item) => item.clips), frameCount: sequence.durationFrames };
 }
 
-async function inspectFrameIdentities(buffer: ArrayBuffer): Promise<FrameIdentity[]> {
+async function inspectFrameIdentities(buffer: ArrayBuffer, reportProgress: SmokeProgress): Promise<FrameIdentity[]> {
+  reportProgress('opening finalized output for frame-identity decode');
   const input = new Input({ source: new BufferSource(buffer), formats: ALL_FORMATS });
   try {
     const track = await input.getPrimaryVideoTrack();
     if (!track) throw new Error('The identity-test output has no video track.');
     const sink = new CanvasSink(track, { alpha: false, poolSize: 1 });
     const identities: FrameIdentity[] = [];
-    for await (const frame of sink.canvases()) identities.push(readIdentity(frame.canvas));
+    for await (const frame of sink.canvases()) {
+      identities.push(readIdentity(frame.canvas));
+      if (identities.length % 10 === 0 || identities.length === 1) reportProgress(`decoded ${identities.length} output frame identities`);
+    }
     return identities;
   } finally {
     input.dispose();
   }
 }
 
-async function runFrameIdentitySmoke() {
-  const sourceBuffers = new Map<string, ArrayBuffer>([
-    ['A', await encodeIdentitySource('A')],
-    ['B', await encodeIdentitySource('B')],
-  ]);
+async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
+  const sourceA = await encodeIdentitySource('A', reportProgress);
+  const sourceB = await encodeIdentitySource('B', reportProgress);
+  const sourceBuffers = new Map<string, ArrayBuffer>([['A', sourceA], ['B', sourceB]]);
   const readers = new Map<string, Awaited<ReturnType<typeof openVideoFrameReader>>>();
   const { tracks, clips, frameCount } = makeTimelineIdentityFixture();
   const plan = createSequenceExportPlan(frameCount, TEST_RATE);
@@ -137,6 +143,7 @@ async function runFrameIdentitySmoke() {
   const context = canvas.getContext('2d', { alpha: false });
   if (!context) throw new Error('Could not create the frame-identity export canvas.');
   try {
+    reportProgress('encoding 65-frame timeline identity output');
     const result = await encodeDeterministicWebm({
       canvas,
       plan,
@@ -144,7 +151,8 @@ async function runFrameIdentitySmoke() {
       audioBitrate: 64_000,
       includeAudio: false,
       signal: new AbortController().signal,
-      drawFrame: async (_frameIndex, timelineTimestamp) => {
+      drawFrame: async (frameIndex, timelineTimestamp) => {
+        if (frameIndex % 10 === 0 || frameIndex === frameCount - 1) reportProgress(`composing timeline identity frame ${frameIndex + 1}/${frameCount}`);
         const clip = selectActiveVideoClip(clips, tracks, timelineTimestamp);
         let sourceCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
         if (clip && sourceBuffers.has(clip.sourceId)) {
@@ -160,7 +168,8 @@ async function runFrameIdentitySmoke() {
         drawLetterboxedVideoFrame(context, canvas.width, canvas.height, sourceCanvas);
       },
     });
-    const fileFrameIdentities = await inspectFrameIdentities(result.buffer);
+    reportProgress('finalized timeline output; decoding frame identities');
+    const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress);
     const expectedFrameIdentities: FrameIdentity[] = Array.from({ length: frameCount }, (_, frameIndex) => {
       const timestamp = plan.timestampSeconds(frameIndex);
       const clip = selectActiveVideoClip(clips, tracks, timestamp);
@@ -207,7 +216,8 @@ async function runFrameIdentitySmoke() {
   }
 }
 
-async function runAudioDurationSmoke() {
+async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
+  reportProgress('encoding one-second audio/container duration smoke');
   const frameRate = TEST_RATE;
   const plan = createSequenceExportPlan(30, frameRate);
   const canvas = document.createElement('canvas');
@@ -225,6 +235,7 @@ async function runAudioDurationSmoke() {
     includeAudio: true,
     signal: new AbortController().signal,
     drawFrame: async (frameIndex) => {
+      if (frameIndex % 10 === 0 || frameIndex === plan.frameCount - 1) reportProgress(`composing audio smoke frame ${frameIndex + 1}/${plan.frameCount}`);
       context.fillStyle = frameIndex % 2 === 0 ? '#ff7418' : '#1769aa';
       context.fillRect(0, 0, canvas.width, canvas.height);
       context.fillStyle = '#fff';
@@ -273,9 +284,11 @@ async function runAudioDurationSmoke() {
   };
 }
 
-export async function runDeterministicWebmSmoke() {
-  const audio = await runAudioDurationSmoke();
-  const frameIdentity = await runFrameIdentitySmoke();
+export async function runDeterministicWebmSmoke(reportProgress: SmokeProgress = reportNoop) {
+  const audio = await runAudioDurationSmoke(reportProgress);
+  reportProgress('audio duration smoke complete; starting frame identity fixture');
+  const frameIdentity = await runFrameIdentitySmoke(reportProgress);
+  reportProgress('all packaged WebM smoke checks complete');
   return {
     ...audio,
     pass: audio.pass && frameIdentity.pass,
