@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   windows-installer:
@@ -46,6 +47,7 @@ jobs:
           }
 
       - name: Smoke-test the packaged renderer and preload bridge
+        id: packaged-smoke
         shell: pwsh
         run: |
           $env:CLIPWRIGHT_SMOKE_TEST = '1'
@@ -74,6 +76,29 @@ jobs:
           - Audio: $($report.actual.audioDurationSeconds)s (delta $($report.actual.audioDurationDeltaSeconds)s); container: $($report.actual.containerDurationSeconds)s (delta $($report.actual.containerDurationDeltaSeconds)s).
           - One-frame duration tolerance: $($report.expected.oneFrameToleranceSeconds)s. Gate: PASS.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+          $videoDuration = ([double]$report.actual.videoDurationSeconds).ToString('0.000000', $invariant)
+          $audioDuration = ([double]$report.actual.audioDurationSeconds).ToString('0.000000', $invariant)
+          $containerDuration = ([double]$report.actual.containerDurationSeconds).ToString('0.000000', $invariant)
+          $durationTolerance = ([double]$report.expected.oneFrameToleranceSeconds).ToString('0.000000', $invariant)
+          $summary = "PASS $($report.counts.encoded)/$($report.expected.frameCount) frames @$($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator)fps; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; tol=${durationTolerance}s"
+          "summary=$summary" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish Windows WebM smoke measurements
+        uses: actions/github-script@v7
+        env:
+          SMOKE_SUMMARY: ${{ steps.packaged-smoke.outputs.summary }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'success',
+              context: 'Windows deterministic WebM export',
+              description: process.env.SMOKE_SUMMARY,
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
 
       - name: Upload installer diagnostics on failure
         if: failure()
