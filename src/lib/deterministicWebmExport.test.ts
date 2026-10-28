@@ -6,9 +6,10 @@ describe('deterministic sequence export plan', () => {
     const at30 = createSequenceExportPlan(90, { numerator: 30, denominator: 1 });
     const at60 = createSequenceExportPlan(180, { numerator: 60, denominator: 1 });
     expect(at30.durationSeconds).toBe(3);
-    expect(at30.timestampSeconds(89)).toBeCloseTo(89 / 30, 12);
+    expect(at30.timestampMicroseconds(89)).toBe(Math.round(89 * 1_000_000 / 30));
+    expect(at30.timestampSeconds(89)).toBe(at30.timestampMicroseconds(89) / 1_000_000);
     expect(at60.durationSeconds).toBe(3);
-    expect(at60.timestampSeconds(179)).toBeCloseTo(179 / 60, 12);
+    expect(at60.timestampMicroseconds(179)).toBe(Math.round(179 * 1_000_000 / 60));
   });
 
   it('rounds a non-frame-aligned endpoint up using the timeline end-exclusive convention', () => {
@@ -17,12 +18,46 @@ describe('deterministic sequence export plan', () => {
     expect(createSequenceExportPlan(667, { numerator: 30, denominator: 1 }).durationSeconds).toBeCloseTo(22.2333333333, 10);
   });
 
-  it('keeps fractional 30000/1001 timestamps anchored to integer frame indices', () => {
-    const plan = createSequenceExportPlan(30_000, { numerator: 30_000, denominator: 1_001 });
-    expect(plan.timestampSeconds(1)).toBeCloseTo(1_001 / 30_000, 14);
-    expect(plan.timestampSeconds(29_999)).toBeCloseTo(29_999 * 1_001 / 30_000, 10);
-    expect(plan.durationSeconds).toBeCloseTo(1_001, 12);
-    expect(plan.frameDurationAt(0)).toBeCloseTo(1_001 / 30_000, 14);
+  it('derives fractional-rate timestamps and durations from rounded integer frame boundaries', () => {
+    const frameRate = { numerator: 30_000, denominator: 1_001 };
+    const plan = createSequenceExportPlan(30_000, frameRate);
+    expect(plan.frameRate).toEqual(frameRate);
+    expect(plan.timestampMicroseconds(1)).toBe(Math.round(1_001 * 1_000_000 / 30_000));
+    expect(plan.timestampMicroseconds(29_999)).toBe(Math.round(29_999 * 1_001 * 1_000_000 / 30_000));
+    expect(plan.timestampSeconds(29_999)).toBe(plan.timestampMicroseconds(29_999) / 1_000_000);
+    expect(plan.durationSeconds).toBe(30_000 * (1_001 / 30_000));
+    expect(plan.frameDurationAt(0)).toBe((plan.timestampMicroseconds(1) - plan.timestampMicroseconds(0)) / 1_000_000);
+    expect(plan.frameDurationAt(1)).toBe((plan.timestampMicroseconds(2) - plan.timestampMicroseconds(1)) / 1_000_000);
+    expect(plan.frameDurationAt(0) + plan.frameDurationAt(1)).toBe(plan.timestampSeconds(2));
+  });
+
+  it('keeps all supported integer and fractional rates monotonic for at least 60 seconds', () => {
+    const rates = [
+      { numerator: 24, denominator: 1 }, { numerator: 25, denominator: 1 },
+      { numerator: 30, denominator: 1 }, { numerator: 50, denominator: 1 },
+      { numerator: 60, denominator: 1 }, { numerator: 24_000, denominator: 1_001 },
+      { numerator: 30_000, denominator: 1_001 }, { numerator: 60_000, denominator: 1_001 },
+    ];
+    for (const frameRate of rates) {
+      const frameCount = Math.ceil(60 * frameRate.numerator / frameRate.denominator);
+      const plan = createSequenceExportPlan(frameCount, frameRate);
+      expect(plan.frameRate).toEqual(frameRate);
+      expect(plan.durationSeconds).toBeGreaterThanOrEqual(60);
+      expect(plan.timestampMicroseconds(0)).toBe(0);
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+        expect(plan.timestampMicroseconds(frameIndex)).toBe(Math.round(frameIndex * frameRate.denominator * 1_000_000 / frameRate.numerator));
+        expect(plan.frameDurationAt(frameIndex)).toBeGreaterThan(0);
+        if (frameIndex > 0) expect(plan.timestampMicroseconds(frameIndex)).toBeGreaterThan(plan.timestampMicroseconds(frameIndex - 1));
+      }
+    }
+  });
+
+  it('uses one endpoint rule immediately before, at, and after a rational frame boundary', () => {
+    const frameRate = { numerator: 30_000, denominator: 1_001 };
+    const boundary = 10 * frameRate.denominator / frameRate.numerator;
+    expect(frameCountForEndTime(boundary - 1e-8, frameRate)).toBe(10);
+    expect(frameCountForEndTime(boundary, frameRate)).toBe(10);
+    expect(frameCountForEndTime(boundary + 1e-8, frameRate)).toBe(11);
   });
 });
 
@@ -61,8 +96,8 @@ describe('frame-index export loop', () => {
     );
     expect(renders).toEqual(Array.from({ length: 12 }, (_, index) => index));
     expect(submitted.map(({ index }) => index)).toEqual(renders);
-    expect(submitted.map(({ timestamp }) => timestamp)).toEqual(renders.map((index) => index / 30));
-    expect(submitted.every(({ duration }) => Math.abs(duration - 1 / 30) < 1e-12)).toBe(true);
+    expect(submitted.map(({ timestamp }) => timestamp)).toEqual(renders.map((index) => plan.timestampSeconds(index)));
+    expect(submitted.map(({ duration }) => duration)).toEqual(renders.map((index) => plan.frameDurationAt(index)));
     expect(maxRenderInFlight).toBe(1);
     expect(counts).toEqual({ requested: 12, rendered: 12, submitted: 12 });
   });

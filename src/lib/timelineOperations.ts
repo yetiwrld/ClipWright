@@ -1,5 +1,5 @@
 import type { ProjectDocument, Sequence, TimelineClip, Track } from './projectDocument';
-import { frameCountForEndTime } from './deterministicWebmExport';
+import { frameCountForEndTime } from './frameTime';
 
 type TimelineOptions = { modifiedAt?: string };
 

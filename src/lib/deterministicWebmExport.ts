@@ -10,17 +10,17 @@ import {
   WebMOutputFormat,
 } from 'mediabunny';
 import type { VideoTrackMetadata } from 'mediabunny';
+import { frameDurationMicroseconds, frameTimestampMicroseconds, MICROSECONDS_PER_SECOND } from './frameTime';
+import type { RationalFrameRate } from './frameTime';
 
-export interface RationalFrameRate {
-  numerator: number;
-  denominator: number;
-}
+export type { RationalFrameRate } from './frameTime';
 
 export interface SequenceExportPlan {
   frameRate: RationalFrameRate;
   frameCount: number;
   durationSeconds: number;
   frameDurationSeconds: number;
+  timestampMicroseconds(frameIndex: number): number;
   timestampSeconds(frameIndex: number): number;
   frameDurationAt(frameIndex: number): number;
 }
@@ -69,34 +69,31 @@ export function createSequenceExportPlan(frameCount: number, frameRate: Rational
     throw new Error('Sequence frame rate must be a positive rational number.');
   }
   const frameDurationSeconds = frameRate.denominator / frameRate.numerator;
+  const assertFrameIndex = (frameIndex: number) => {
+    if (!Number.isSafeInteger(frameIndex) || frameIndex < 0 || frameIndex >= frameCount) throw new RangeError('Frame index is outside the active sequence.');
+  };
   return {
     frameRate: { ...frameRate },
     frameCount,
     durationSeconds: frameCount * frameDurationSeconds,
     frameDurationSeconds,
+    timestampMicroseconds: (frameIndex) => {
+      assertFrameIndex(frameIndex);
+      return frameTimestampMicroseconds(frameIndex, frameRate);
+    },
     timestampSeconds: (frameIndex) => {
-      if (!Number.isSafeInteger(frameIndex) || frameIndex < 0 || frameIndex >= frameCount) throw new RangeError('Frame index is outside the active sequence.');
-      return frameIndex * frameRate.denominator / frameRate.numerator;
+      assertFrameIndex(frameIndex);
+      return frameTimestampMicroseconds(frameIndex, frameRate) / MICROSECONDS_PER_SECOND;
     },
     frameDurationAt: (frameIndex) => {
-      if (!Number.isSafeInteger(frameIndex) || frameIndex < 0 || frameIndex >= frameCount) throw new RangeError('Frame index is outside the active sequence.');
-      return frameDurationSeconds;
+      assertFrameIndex(frameIndex);
+      return frameDurationMicroseconds(frameIndex, frameRate) / MICROSECONDS_PER_SECOND;
     },
   };
 }
 
-/**
- * The timeline convention is end-exclusive: durationFrames is the first frame index at or after the final clip end.
- * A non-frame-aligned endpoint therefore rounds up to include the frame containing that endpoint.
- */
-export function frameCountForEndTime(endSeconds: number, frameRate: RationalFrameRate): number {
-  if (!Number.isFinite(endSeconds) || endSeconds <= 0) return 0;
-  if (!Number.isSafeInteger(frameRate.numerator) || frameRate.numerator <= 0 || !Number.isSafeInteger(frameRate.denominator) || frameRate.denominator <= 0) {
-    throw new Error('Sequence frame rate must be a positive rational number.');
-  }
-  const exactFrames = endSeconds * frameRate.numerator / frameRate.denominator;
-  return Math.max(0, Math.ceil(exactFrames - 1e-7));
-}
+/** End-exclusive endpoint rule: include the frame containing any non-aligned endpoint. */
+export { frameCountForEndTime } from './frameTime';
 
 export async function runExactFramePipeline(
   plan: SequenceExportPlan,

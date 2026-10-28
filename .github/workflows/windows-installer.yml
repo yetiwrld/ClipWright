@@ -75,13 +75,14 @@ jobs:
           - Video: $($report.actual.videoDurationSeconds)s (delta $($report.actual.videoDurationDeltaSeconds)s), measured rate $($report.actual.measuredVideoFrameRate) fps, $($report.actual.videoDimensions.width)x$($report.actual.videoDimensions.height).
           - Audio: $($report.actual.audioDurationSeconds)s (delta $($report.actual.audioDurationDeltaSeconds)s); container: $($report.actual.containerDurationSeconds)s (delta $($report.actual.containerDurationDeltaSeconds)s).
           - One-frame duration tolerance: $($report.expected.oneFrameToleranceSeconds)s. Gate: PASS.
+          - Frame identity: $($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames) decoded frames matched source A/B frame IDs and black-gap/offline expectations; $($report.frameIdentity.mismatchCount) mismatches. Fixture includes cuts, trims, adjacent split clips, a 5-frame gap, and a 5-frame offline clip.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           $invariant = [System.Globalization.CultureInfo]::InvariantCulture
           $videoDuration = ([double]$report.actual.videoDurationSeconds).ToString('0.000000', $invariant)
           $audioDuration = ([double]$report.actual.audioDurationSeconds).ToString('0.000000', $invariant)
           $containerDuration = ([double]$report.actual.containerDurationSeconds).ToString('0.000000', $invariant)
           $durationTolerance = ([double]$report.expected.oneFrameToleranceSeconds).ToString('0.000000', $invariant)
-          $summary = "PASS $($report.counts.encoded)/$($report.expected.frameCount) frames @$($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator)fps; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; tol=${durationTolerance}s"
+          $summary = "PASS $($report.counts.encoded)/$($report.expected.frameCount) A/V frames @$($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator)fps; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; id=$($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames),err=$($report.frameIdentity.mismatchCount); tol=${durationTolerance}s"
           "summary=$summary" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Publish Windows WebM smoke measurements

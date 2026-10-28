@@ -161,8 +161,10 @@ describe('ClipWright foundation UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hide Video 1' }));
     expect(container.querySelector('.timeline-track-header-rows .track-row')?.classList.contains('is-track-hidden')).toBe(true);
     expect(screen.getByRole('button', { name: 'Show Video 1' })).toBeTruthy();
-    const trackDoc = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0];
-    expect(trackDoc.sequences[0].tracks[0]).toMatchObject({ muted: true, locked: true });
+    await waitFor(() => {
+      const trackDoc = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0];
+      expect(trackDoc.sequences[0].tracks[0]).toMatchObject({ muted: true, locked: true, hidden: true });
+    });
     expect(container.querySelector('.timeline-track-header-rows .audio-track .track-header')?.getAttribute('title')?.toLowerCase()).toContain('adjust gain and pan');
     const startingTimelineHeight = Number(timelineResizer.getAttribute('aria-valuenow'));
     fireEvent.keyDown(timelineResizer, { key: 'ArrowDown' });
@@ -260,8 +262,10 @@ describe('ClipWright foundation UI', () => {
     const soloAudio = screen.getByRole('button', { name: 'Solo Audio 1' });
     fireEvent.click(soloAudio);
     expect(screen.getByRole('button', { name: 'Unsolo Audio 1' }).getAttribute('aria-pressed')).toBe('true');
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[1].solo).toBe(true));
     fireEvent.click(screen.getByRole('button', { name: 'Unsolo Audio 1' }));
     expect(screen.getByRole('button', { name: 'Solo Audio 1' }).getAttribute('aria-pressed')).toBe('false');
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].sequences[0].tracks[1].solo).toBe(false));
     const gainControl = screen.getByRole('slider', { name: 'Audio 1 gain' }) as HTMLInputElement;
     fireEvent.change(gainControl, { target: { value: '1.5' } });
     expect(screen.getByText('150%')).toBeTruthy();

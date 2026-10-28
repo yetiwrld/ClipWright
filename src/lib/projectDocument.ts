@@ -1,4 +1,5 @@
 import type { Project } from './projects';
+import { frameCountForEndTime } from './frameTime';
 
 export const PROJECT_SCHEMA_VERSION = 2;
 export const PROJECT_DOCUMENTS_KEY = 'clipwright.project-documents.v1';
@@ -43,6 +44,10 @@ export type Track = {
   kind: 'video' | 'audio';
   muted: boolean;
   locked: boolean;
+  /** Optional schema-v2 track visibility state. Omitted by older documents and treated as visible. */
+  hidden?: boolean;
+  /** Optional schema-v2 audio solo state. Omitted by older documents and treated as off. */
+  solo?: boolean;
   /** Linear audio gain, where 1 is unity. Older schema-v2 tracks omit this and default to 1. */
   gain?: number;
   /** Stereo pan from -1 (left) to 1 (right). Older schema-v2 tracks omit this and default to center. */
@@ -90,6 +95,13 @@ function reduceRational(numerator: number, denominator: number): Rational {
 }
 
 function decimalToRational(value: number): Rational {
+  const exactPresets: Array<[number, Rational]> = [
+    [23.976, { numerator: 24_000, denominator: 1_001 }],
+    [29.97, { numerator: 30_000, denominator: 1_001 }],
+    [59.94, { numerator: 60_000, denominator: 1_001 }],
+  ];
+  const exactPreset = exactPresets.find(([displayRate]) => Math.abs(value - displayRate) < 1e-9);
+  if (exactPreset) return { ...exactPreset[1] };
   const places = Math.min((String(value).split('.')[1] ?? '').length, 6);
   const denominator = 10 ** places;
   return reduceRational(Math.round(value * denominator), denominator);
@@ -128,8 +140,8 @@ export function createProjectDocument(project: Project, appVersion = '0.1.0', ma
       audioSampleRate: 48000,
       durationFrames: 0,
       tracks: [
-        { id: makeId('video-track'), name: 'Video 1', kind: 'video', muted: false, locked: false, gain: 1, pan: 0, clips: [] },
-        { id: makeId('audio-track'), name: 'Audio 1', kind: 'audio', muted: false, locked: false, gain: 1, pan: 0, clips: [] },
+        { id: makeId('video-track'), name: 'Video 1', kind: 'video', muted: false, locked: false, hidden: false, solo: false, gain: 1, pan: 0, clips: [] },
+        { id: makeId('audio-track'), name: 'Audio 1', kind: 'audio', muted: false, locked: false, hidden: false, solo: false, gain: 1, pan: 0, clips: [] },
       ],
     }],
   };
@@ -230,6 +242,8 @@ export function validateProjectDocument(value: unknown): ValidationResult {
       if (!['video', 'audio'].includes(String(track.kind))) errors.push(`${trackPath}.kind is unsupported.`);
       if (typeof track.muted !== 'boolean') errors.push(`${trackPath}.muted must be a boolean.`);
       if (typeof track.locked !== 'boolean') errors.push(`${trackPath}.locked must be a boolean.`);
+      if (track.hidden !== undefined && typeof track.hidden !== 'boolean') errors.push(`${trackPath}.hidden must be a boolean when present.`);
+      if (track.solo !== undefined && typeof track.solo !== 'boolean') errors.push(`${trackPath}.solo must be a boolean when present.`);
       if (track.gain !== undefined && (typeof track.gain !== 'number' || !Number.isFinite(track.gain) || track.gain < 0 || track.gain > 2)) errors.push(`${trackPath}.gain must be a finite value between 0 and 2.`);
       if (track.pan !== undefined && (typeof track.pan !== 'number' || !Number.isFinite(track.pan) || track.pan < -1 || track.pan > 1)) errors.push(`${trackPath}.pan must be a finite value between -1 and 1.`);
       if (!Array.isArray(track.clips)) { errors.push(`${trackPath}.clips must be an array.`); return; }
@@ -288,7 +302,7 @@ export function validateProjectDocument(value: unknown): ValidationResult {
       }
       const endSeconds = allClips.reduce((end, clip) => isObject(clip) && typeof clip.start === 'number' && typeof clip.trimIn === 'number' && typeof clip.trimOut === 'number'
         ? Math.max(end, clip.start + clip.trimOut - clip.trimIn) : end, 0);
-      const expectedDurationFrames = Math.ceil(endSeconds * sequence.frameRate.numerator / sequence.frameRate.denominator - 1e-7);
+      const expectedDurationFrames = frameCountForEndTime(endSeconds, sequence.frameRate);
       if (isInteger(sequence.durationFrames) && sequence.durationFrames !== expectedDurationFrames) errors.push(`${path}.durationFrames must match the end of the last clip.`);
     }
   });
@@ -368,7 +382,7 @@ export function migrateProjectDocumentV1(value: unknown): ProjectDocument {
       return { ...rawTrack, clips };
     });
     const endSeconds = tracks.flatMap((track) => track.clips).reduce((end, clip) => Math.max(end, clip.start + clip.trimOut - clip.trimIn), 0);
-    return { ...rawSequence, tracks, durationFrames: Math.ceil(endSeconds * fps - 1e-7) };
+    return { ...rawSequence, tracks, durationFrames: frameCountForEndTime(endSeconds, rawSequence.frameRate) };
   });
   return { ...value, schemaVersion: PROJECT_SCHEMA_VERSION, sequences } as unknown as ProjectDocument;
 }

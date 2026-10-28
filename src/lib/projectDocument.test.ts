@@ -15,6 +15,19 @@ describe('versioned project documents', () => {
     expect(parseProjectDocument(serializeProjectDocument(document))).toEqual(document);
   });
 
+  it('maps displayed fractional project rates to their exact rational sequence rates', () => {
+    const cases = [
+      [23.976, { numerator: 24_000, denominator: 1_001 }],
+      [29.97, { numerator: 30_000, denominator: 1_001 }],
+      [50, { numerator: 50, denominator: 1 }],
+      [59.94, { numerator: 60_000, denominator: 1_001 }],
+    ] as const;
+    for (const [displayRate, exactRate] of cases) {
+      const document = createProjectDocument(createProject('Fractional sequence', '16:9', displayRate));
+      expect(document.sequences[0].frameRate).toEqual(exactRate);
+    }
+  });
+
   it('supports backward-compatible per-track gain and pan settings', () => {
     const document = createProjectDocument(createProject('Audio controls', '16:9', 30));
     const audioTrack = document.sequences[0].tracks.find((track) => track.kind === 'audio')!;
@@ -34,6 +47,28 @@ describe('versioned project documents', () => {
     const invalidResult = validateProjectDocument(legacySchemaV2);
     expect(invalidResult.valid).toBe(false);
     if (!invalidResult.valid) expect(invalidResult.errors).toContain('sequences[0].tracks[1].gain must be a finite value between 0 and 2.');
+  });
+
+  it('persists track hide and solo render state while accepting older schema-v2 tracks', () => {
+    const document = createProjectDocument(createProject('Render state', '16:9', 30));
+    const [videoTrack, audioTrack] = document.sequences[0].tracks;
+    videoTrack.hidden = true;
+    audioTrack.solo = true;
+    const reopened = parseProjectDocument(serializeProjectDocument(document));
+    expect(reopened.sequences[0].tracks[0].hidden).toBe(true);
+    expect(reopened.sequences[0].tracks[1].solo).toBe(true);
+
+    const olderV2 = structuredClone(reopened);
+    delete olderV2.sequences[0].tracks[0].hidden;
+    delete olderV2.sequences[0].tracks[1].solo;
+    expect(validateProjectDocument(olderV2).valid).toBe(true);
+    expect(parseProjectDocument(serializeProjectDocument(olderV2)).sequences[0].tracks.map((track) => [track.hidden ?? false, track.solo ?? false])).toEqual([[false, false], [false, false]]);
+
+    const invalid = structuredClone(olderV2);
+    invalid.sequences[0].tracks[0].hidden = 'yes' as unknown as boolean;
+    const result = validateProjectDocument(invalid);
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.errors).toContain('sequences[0].tracks[0].hidden must be a boolean when present.');
   });
 
   it('migrates a project-list entry to a v2 empty project document', () => {

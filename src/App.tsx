@@ -20,6 +20,7 @@ import { calculateWaveformPeaks } from './lib/audioWaveform';
 import { AudioBufferSink, ALL_FORMATS, BufferSource, Input } from 'mediabunny';
 import type { WrappedAudioBuffer } from 'mediabunny';
 import { areExportFrameCountsExact, createSequenceExportPlan, encodeDeterministicWebm } from './lib/deterministicWebmExport';
+import { drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './lib/timelineVideoFrames';
 import {
   addTimelineClip, clipDuration, clipEnd, duplicateTimelineClips, moveTimelineClips, pasteTimelineClips,
   quantizeTimelineTime, removeTimelineClips, resizeTimelineClip, sequenceDurationSeconds, splitTimelineClip,
@@ -51,7 +52,7 @@ function aspectRatioOf(width: number, height: number) {
   return `${width / divisor}:${height / divisor}`;
 }
 
-type SessionMediaSource = { url: string; name: string };
+type SessionMediaSource = { url: string; name: string; blob: Blob };
 type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
 const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
@@ -538,7 +539,7 @@ export default function App() {
       const key = mediaKey(projectId!, asset.id);
       const oldUrl = sessionSourcesRef.current[key]?.url;
       if (oldUrl) URL.revokeObjectURL(oldUrl);
-      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName } };
+      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName, blob: file } };
       sessionSourcesRef.current = nextSources;
       setSessionSources(nextSources);
       setDocuments((current) => current.map((entry) => entry.id === projectId ? updatedDocument : entry));
@@ -624,7 +625,7 @@ export default function App() {
       const key = mediaKey(projectId!, asset.id);
       const oldUrl = sessionSourcesRef.current[key]?.url;
       if (oldUrl) URL.revokeObjectURL(oldUrl);
-      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName } };
+      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName, blob: file } };
       sessionSourcesRef.current = nextSources;
       setSessionSources(nextSources);
       setDocuments((current) => current.map((entry) => entry.id === projectId ? updatedDocument : entry));
@@ -1140,6 +1141,16 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
   const [name, setName] = useState('');
   const [ratio, setRatio] = useState<AspectRatio>('16:9');
   const [fps, setFps] = useState<Project['frameRate']>(30);
+  const frameRateOptions: Array<{ value: number; label: string }> = [
+    { value: 23.976, label: '23.976 fps (24000/1001)' },
+    { value: 24, label: '24 fps' },
+    { value: 25, label: '25 fps' },
+    { value: 29.97, label: '29.97 fps (30000/1001)' },
+    { value: 30, label: '30 fps' },
+    { value: 50, label: '50 fps' },
+    { value: 59.94, label: '59.94 fps (60000/1001)' },
+    { value: 60, label: '60 fps' },
+  ];
   const fieldRef = useRef<HTMLInputElement>(null);
   const dialogRef = useDialogFocusTrap<HTMLElement>(() => fieldRef.current);
   return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -1148,7 +1159,7 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
       <div className="eyebrow">NEW WORKSPACE</div><h2 id="create-title">Create a project</h2><p className="dialog-copy">Set up your sequence. You can change these settings later.</p>
       <form onSubmit={(event) => { event.preventDefault(); onCreate(name, ratio, fps); }}>
         <label className="field-label" htmlFor="project-name">Project name</label><input ref={fieldRef} id="project-name" className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Summer campaign" maxLength={80} required />
-        <div className="form-row"><div><label className="field-label" htmlFor="aspect-ratio">Aspect ratio</label><select id="aspect-ratio" className="select-input" value={ratio} onChange={(event) => setRatio(event.target.value as AspectRatio)}><option>16:9</option><option>9:16</option><option>1:1</option></select></div><div><label className="field-label" htmlFor="frame-rate">Frame rate</label><select id="frame-rate" className="select-input" value={fps} onChange={(event) => setFps(Number(event.target.value) as Project['frameRate'])}><option value={24}>24 fps</option><option value={25}>25 fps</option><option value={30}>30 fps</option><option value={60}>60 fps</option></select></div></div>
+        <div className="form-row"><div><label className="field-label" htmlFor="aspect-ratio">Aspect ratio</label><select id="aspect-ratio" className="select-input" value={ratio} onChange={(event) => setRatio(event.target.value as AspectRatio)}><option>16:9</option><option>9:16</option><option>1:1</option></select></div><div><label className="field-label" htmlFor="frame-rate">Frame rate</label><select id="frame-rate" className="select-input" value={fps} onChange={(event) => setFps(Number(event.target.value) as Project['frameRate'])}>{frameRateOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div></div>
         <div className="local-note"><HardDrive size={14} /><span>Project details are saved locally in this browser profile. No media is copied.</span></div>
         <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button-primary"><Plus size={15} />Create project</button></div>
       </form>
@@ -1206,8 +1217,8 @@ function EditorFoundation({
   const [deckUrls, setDeckUrls] = useState<[string | null, string | null]>([null, null]);
   const [deckReady, setDeckReady] = useState<[boolean, boolean]>([false, false]);
   const [timelineVideoVisible, setTimelineVideoVisible] = useState(false);
-  const [hiddenTrackIds, setHiddenTrackIds] = useState<Record<string, boolean>>({});
-  const [soloTrackIds, setSoloTrackIds] = useState<string[]>([]);
+  const hiddenTrackIds = useMemo(() => Object.fromEntries(tracks.filter((track) => track.hidden).map((track) => [track.id, true])), [tracks]);
+  const soloTrackIds = useMemo(() => tracks.filter((track) => track.solo).map((track) => track.id), [tracks]);
   const [timelineScrollOffsets, setTimelineScrollOffsets] = useState({ left: 0, top: 0 });
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [rippleMode, setRippleMode] = useState(false);
@@ -1370,9 +1381,23 @@ function EditorFoundation({
     }), `Updated ${trackName} gain and pan.`);
   }
 
+  function updateTrackRenderState(trackId: string, field: 'hidden' | 'solo') {
+    if (!sequence) return;
+    const track = tracks.find((item) => item.id === trackId);
+    if (!track) return;
+    const nextValue = !track[field];
+    const verb = field === 'hidden' ? (nextValue ? 'Hid' : 'Showed') : (nextValue ? 'Soloed' : 'Unsoloed');
+    persistTimelineEdit((document) => ({
+      ...document,
+      metadata: { ...document.metadata, modifiedAt: new Date().toISOString() },
+      sequences: document.sequences.map((item) => item.id === sequence.id
+        ? { ...item, tracks: item.tracks.map((candidate) => candidate.id === trackId ? { ...candidate, [field]: nextValue } : candidate) }
+        : item),
+    }), `${verb} ${track.name}; this render state is saved with the project.`);
+  }
+
   function toggleTrackSolo(trackId: string) {
-    setSoloTrackIds((current) => current.includes(trackId) ? current.filter((id) => id !== trackId) : [...current, trackId]);
-    requestPreviewRefresh();
+    updateTrackRenderState(trackId, 'solo');
   }
 
   async function generateAudioWaveform(asset: MediaAsset) {
@@ -1436,9 +1461,7 @@ function EditorFoundation({
   }
 
   function activeVideoAt(time: number) {
-    return videoClips
-      .filter((clip) => !hiddenTrackIds[clip.trackId] && time >= clip.start - 1e-7 && time < clipEnd(clip) - 1e-7)
-      .sort((a, b) => tracks.findIndex((track) => track.id === b.trackId) - tracks.findIndex((track) => track.id === a.trackId))[0] ?? null;
+    return selectActiveVideoClip(videoClips, tracks, time, hiddenTrackIds);
   }
   function activeAudioAt(time: number) {
     return audioClips
@@ -1719,7 +1742,7 @@ function EditorFoundation({
       exhausted: boolean;
     };
     const audioReaders: AudioReader[] = [];
-    const exportVideos = new Map<string, HTMLVideoElement>();
+    const videoFrameReaders = new Map<string, Awaited<ReturnType<typeof openVideoFrameReader>>>();
     const controller = new AbortController();
     exportAbortControllerRef.current = controller;
     isExportingRef.current = true;
@@ -1733,50 +1756,6 @@ function EditorFoundation({
     const checkCancelled = () => {
       if (controller.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
     };
-    const waitForVideoEvent = (video: HTMLVideoElement, eventName: 'loadeddata' | 'seeked') => new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
-        video.removeEventListener(eventName, onReady);
-        video.removeEventListener('error', onError);
-        controller.signal.removeEventListener('abort', onAbort);
-      };
-      const onReady = () => { cleanup(); resolve(); };
-      const onError = () => { cleanup(); reject(new Error(`The browser could not decode ${video.currentSrc || 'a timeline video source'}.`)); };
-      const onAbort = () => { cleanup(); reject(new DOMException('Export cancelled.', 'AbortError')); };
-      video.addEventListener(eventName, onReady, { once: true });
-      video.addEventListener('error', onError, { once: true });
-      controller.signal.addEventListener('abort', onAbort, { once: true });
-    });
-    const readyVideo = async (url: string) => {
-      let video = exportVideos.get(url);
-      if (!video) {
-        video = window.document.createElement('video');
-        video.preload = 'auto';
-        video.muted = true;
-        video.playsInline = true;
-        video.src = url;
-        exportVideos.set(url, video);
-        video.load();
-      }
-      if (video.readyState < 2) {
-        const ready = waitForVideoEvent(video, 'loadeddata');
-        if (video.readyState < 2) await ready;
-      }
-      checkCancelled();
-      return video;
-    };
-    const seekExportVideo = async (video: HTMLVideoElement, sourceTime: number) => {
-      if (video.readyState >= 2 && !video.seeking && Math.abs(video.currentTime - sourceTime) < 1e-7) return;
-      const seeked = waitForVideoEvent(video, 'seeked');
-      try { video.currentTime = Math.max(0, sourceTime); }
-      catch (error) { throw new Error(error instanceof Error ? `Could not seek a timeline video: ${error.message}` : 'Could not seek a timeline video.'); }
-      await seeked;
-      checkCancelled();
-      if (video.readyState < 2) {
-        const ready = waitForVideoEvent(video, 'loadeddata');
-        if (video.readyState < 2) await ready;
-      }
-    };
-
     try {
       const audioCandidates = [
         ...audioClips.map((clip) => ({ clip, track: tracks.find((track) => track.id === clip.trackId) })).filter((item): item is { clip: TimelineClip; track: Track } => Boolean(item.track)),
@@ -1854,25 +1833,22 @@ function EditorFoundation({
 
       const exportFrame = async (_frameIndex: number, timestampSeconds: number) => {
         checkCancelled();
-        const clip = videoClips
-          .filter((candidate) => !activeHiddenTracks[candidate.trackId] && timestampSeconds >= candidate.start - 1e-9 && timestampSeconds < clipEnd(candidate) - 1e-9)
-          .sort((a, b) => tracks.findIndex((track) => track.id === b.trackId) - tracks.findIndex((track) => track.id === a.trackId))[0] ?? null;
-        let video: HTMLVideoElement | null = null;
+        const clip = selectActiveVideoClip(videoClips, tracks, timestampSeconds, activeHiddenTracks);
+        let sourceCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
         if (clip) {
           const source = activeSessionSources[mediaKey(activeProjectDocument.id, clip.sourceId)];
           if (source) {
-            video = await readyVideo(source.url);
-            await seekExportVideo(video, clip.trimIn + timestampSeconds - clip.start);
+            let reader = videoFrameReaders.get(source.url);
+            if (!reader) {
+              reader = await openVideoFrameReader(source.blob);
+              videoFrameReaders.set(source.url, reader);
+            }
+            const decoded = await reader.getCanvasAt(sourceTimeForTimelineClip(clip, timestampSeconds));
+            sourceCanvas = decoded?.canvas ?? null;
           }
         }
-        canvasContext.fillStyle = '#000';
-        canvasContext.fillRect(0, 0, canvas.width, canvas.height);
-        if (video && video.videoWidth > 0 && video.videoHeight > 0) {
-          const scale = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
-          const width = video.videoWidth * scale;
-          const height = video.videoHeight * scale;
-          canvasContext.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-        }
+        checkCancelled();
+        drawLetterboxedVideoFrame(canvasContext, canvas.width, canvas.height, sourceCanvas);
       };
 
       const bitrates = getExportBitrates(outputDimensions.width, outputDimensions.height, frameRateValue, exportQuality);
@@ -1933,12 +1909,8 @@ function EditorFoundation({
         try { await reader.iterator.return?.(); } catch { /* Release decoder iterators after successful output or cancellation. */ }
         reader.input.dispose();
       }
-      for (const video of exportVideos.values()) {
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
-      }
-      exportVideos.clear();
+      for (const reader of videoFrameReaders.values()) await reader.dispose();
+      videoFrameReaders.clear();
       if (exportAbortControllerRef.current === controller) exportAbortControllerRef.current = null;
       isExportingRef.current = false;
       setIsExporting(false);
@@ -2602,9 +2574,9 @@ function EditorFoundation({
                 <span className="track-header-name">{track.name}</span>
                 <div className="track-header-actions">
                   <button className="track-action" type="button" title={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`} aria-label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`} aria-pressed={track.muted} onClick={() => onToggleTrackState(track.id, 'muted')}>{track.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}</button>
-                  {track.kind === 'audio' && <button className={`track-action track-solo-action${soloTrackIds.includes(track.id) ? ' is-soloed' : ''}`} type="button" title={soloTrackIds.includes(track.id) ? `Unsolo ${track.name}` : `Solo ${track.name}`} aria-label={soloTrackIds.includes(track.id) ? `Unsolo ${track.name}` : `Solo ${track.name}`} aria-pressed={soloTrackIds.includes(track.id)} disabled={isExporting} onClick={() => toggleTrackSolo(track.id)}><span>S</span></button>}
+                  {track.kind === 'audio' && <button className={`track-action track-solo-action${soloTrackIds.includes(track.id) ? ' is-soloed' : ''}`} type="button" title={soloTrackIds.includes(track.id) ? `Unsolo ${track.name} (saved; affects preview and export)` : `Solo ${track.name} (saved; affects preview and export)`} aria-label={soloTrackIds.includes(track.id) ? `Unsolo ${track.name}` : `Solo ${track.name}`} aria-pressed={soloTrackIds.includes(track.id)} disabled={isExporting} onClick={() => toggleTrackSolo(track.id)}><span>S</span></button>}
                   <button className="track-action" type="button" title={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`} aria-label={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`} aria-pressed={track.locked} onClick={() => onToggleTrackState(track.id, 'locked')}>{track.locked ? <Lock size={12} /> : <LockOpen size={12} />}</button>
-                  <button className="track-action" type="button" title={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-label={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-pressed={!!hiddenTrackIds[track.id]} onClick={() => setHiddenTrackIds((current) => ({ ...current, [track.id]: !current[track.id] }))}>{hiddenTrackIds[track.id] ? <EyeOff size={12} /> : <Eye size={12} />}</button>
+                  <button className="track-action" type="button" title={hiddenTrackIds[track.id] ? `Show ${track.name} (saved; affects preview and export)` : `Hide ${track.name} (saved; affects preview and export)`} aria-label={hiddenTrackIds[track.id] ? `Show ${track.name}` : `Hide ${track.name}`} aria-pressed={!!hiddenTrackIds[track.id]} onClick={() => updateTrackRenderState(track.id, 'hidden')}>{hiddenTrackIds[track.id] ? <EyeOff size={12} /> : <Eye size={12} />}</button>
                 </div>
               </div>
             </div>)}
