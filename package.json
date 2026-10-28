@@ -20,7 +20,7 @@
     "desktop:dev": "concurrently -k -s last \"vite --host 127.0.0.1 --port 5174 --strictPort\" \"wait-on tcp:127.0.0.1:5174 && cross-env CLIPWRIGHT_RENDERER_URL=http://127.0.0.1:5174 electron .\"",
     "desktop:preview": "npm run build && electron .",
     "desktop:smoke": "npm run build && cross-env CLIPWRIGHT_SMOKE_TEST=1 electron .",
-    "desktop:dist:win": "npm run build && electron-builder --win nsis --x64"
+    "desktop:dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
