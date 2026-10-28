@@ -49,6 +49,8 @@ jobs:
         shell: pwsh
         run: |
           $env:CLIPWRIGHT_SMOKE_TEST = '1'
+          $reportPath = Join-Path $env:RUNNER_TEMP 'deterministic-webm-smoke.json'
+          $env:CLIPWRIGHT_SMOKE_REPORT_PATH = $reportPath
           $appPath = Join-Path 'release\win-unpacked' 'ClipWright Studio.exe'
           if (-not (Test-Path $appPath)) {
             throw "Packaged application executable not found: $appPath"
@@ -57,6 +59,21 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "Packaged application smoke test failed with exit code $($process.ExitCode)."
           }
+          if (-not (Test-Path $reportPath)) {
+            throw 'Packaged application did not write the deterministic WebM export measurements.'
+          }
+          $report = Get-Content -Raw $reportPath | ConvertFrom-Json
+          if (-not $report.pass) {
+            throw "Deterministic WebM frame-count or duration gate failed: $($report | ConvertTo-Json -Depth 8 -Compress)"
+          }
+          @"
+          ## Packaged Windows deterministic WebM export smoke
+          - Expected: $($report.expected.frameCount) frames at $($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator) fps; frame-aligned video duration $($report.expected.frameAlignedVideoDurationSeconds)s.
+          - Frame counts: requested $($report.counts.requested), rendered $($report.counts.rendered), submitted $($report.counts.submitted), encoded $($report.counts.encoded), output file $($report.counts.outputFile).
+          - Video: $($report.actual.videoDurationSeconds)s (delta $($report.actual.videoDurationDeltaSeconds)s), measured rate $($report.actual.measuredVideoFrameRate) fps, $($report.actual.videoDimensions.width)x$($report.actual.videoDimensions.height).
+          - Audio: $($report.actual.audioDurationSeconds)s (delta $($report.actual.audioDurationDeltaSeconds)s); container: $($report.actual.containerDurationSeconds)s (delta $($report.actual.containerDurationDeltaSeconds)s).
+          - One-frame duration tolerance: $($report.expected.oneFrameToleranceSeconds)s. Gate: PASS.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload installer diagnostics on failure
         if: failure()

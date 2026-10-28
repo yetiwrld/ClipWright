@@ -244,6 +244,9 @@ function runRendererSmokeCheck(window) {
             new Promise((_, reject) => setTimeout(() => reject(new Error('Deterministic WebM export smoke timed out after 45 seconds.')), 45_000)),
           ]);
           if (!measurements?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(measurements)}`);
+          if (process.env.CLIPWRIGHT_SMOKE_TEST === '1' && process.env.CLIPWRIGHT_SMOKE_REPORT_PATH) {
+            await fs.writeFile(process.env.CLIPWRIGHT_SMOKE_REPORT_PATH, `${JSON.stringify(measurements, null, 2)}\n`, 'utf8');
+          }
           finished = true;
           console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(measurements)}`);
           app.exit(0);
