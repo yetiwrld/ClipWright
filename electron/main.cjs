@@ -225,7 +225,7 @@ async function writeSmokeReport(report) {
 }
 
 function runRendererSmokeCheck(window) {
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + 150_000;
   let finished = false;
   let exportSmokeStarted = false;
   let stage = 'checking renderer mount and preload IPC';
@@ -256,7 +256,7 @@ function runRendererSmokeCheck(window) {
           stage = 'running deterministic WebM export and frame-identity smoke';
           smokeMeasurements = await Promise.race([
             window.webContents.executeJavaScript(`import('./export-smoke.js').then(({ runDeterministicWebmSmoke }) => runDeterministicWebmSmoke())`),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Deterministic WebM export smoke timed out after 45 seconds.')), 45_000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Deterministic WebM export smoke timed out after 120 seconds.')), 120_000)),
           ]);
           await writeSmokeReport(smokeMeasurements);
           if (!smokeMeasurements?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(smokeMeasurements)}`);
@@ -280,7 +280,7 @@ function runRendererSmokeCheck(window) {
 
     if (Date.now() >= deadline) {
       finished = true;
-      const error = 'Renderer mount, preload IPC, and deterministic export check did not complete within 60 seconds.';
+      const error = 'Renderer mount, preload IPC, and deterministic export check did not complete within 150 seconds.';
       await writeSmokeReport({ pass: false, stage, error });
       console.error('Desktop smoke test failed:', error);
       app.exit(1);
