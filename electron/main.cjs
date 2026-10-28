@@ -215,8 +215,9 @@ function registerIpcHandlers() {
 }
 
 function runRendererSmokeCheck(window) {
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 60_000;
   let finished = false;
+  let exportSmokeStarted = false;
   const check = async () => {
     if (finished) return;
     if (window.isDestroyed()) {
@@ -236,18 +237,29 @@ function runRendererSmokeCheck(window) {
         };
       })()`);
       if (state.title === 'ClipWright Studio' && state.mounted && state.info?.name && state.info?.platform) {
-        finished = true;
-        console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}.`);
-        app.exit(0);
-        return;
+        if (!exportSmokeStarted) {
+          exportSmokeStarted = true;
+          const measurements = await Promise.race([
+            window.webContents.executeJavaScript(`import('./export-smoke.js').then(({ runDeterministicWebmSmoke }) => runDeterministicWebmSmoke())`),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Deterministic WebM export smoke timed out after 45 seconds.')), 45_000)),
+          ]);
+          if (!measurements?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(measurements)}`);
+          finished = true;
+          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(measurements)}`);
+          app.exit(0);
+          return;
+        }
       }
     } catch (error) {
-      console.error('Desktop smoke test could not inspect the renderer:', error);
+      finished = true;
+      console.error('Desktop smoke test failed:', error);
+      app.exit(1);
+      return;
     }
 
     if (Date.now() >= deadline) {
       finished = true;
-      console.error('Desktop smoke test failed: renderer did not mount and answer the preload IPC check within 20 seconds.');
+      console.error('Desktop smoke test failed: renderer mount, preload IPC, and deterministic export check did not complete within 60 seconds.');
       app.exit(1);
       return;
     }
