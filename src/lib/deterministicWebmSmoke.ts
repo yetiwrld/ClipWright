@@ -158,11 +158,14 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
         if (clip && sourceBuffers.has(clip.sourceId)) {
           let reader = readers.get(clip.sourceId);
           if (!reader) {
+            reportProgress(`opening source ${clip.sourceId} frame reader`);
             const bytes = sourceBuffers.get(clip.sourceId)!;
             reader = await openVideoFrameReader(new Blob([bytes], { type: 'video/webm' }));
             readers.set(clip.sourceId, reader);
           }
+          reportProgress(`requesting source ${clip.sourceId} frame at ${sourceTimeForTimelineClip(clip, timelineTimestamp).toFixed(6)}s`);
           const decoded = await reader.getCanvasAt(sourceTimeForTimelineClip(clip, timelineTimestamp));
+          reportProgress(`decoded source ${clip.sourceId} frame for timeline frame ${frameIndex + 1}`);
           sourceCanvas = decoded?.canvas ?? null;
         }
         drawLetterboxedVideoFrame(context, canvas.width, canvas.height, sourceCanvas);
