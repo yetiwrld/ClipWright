@@ -5,86 +5,71 @@ import { clipEnd } from './timelineOperations';
 
 export type TimelineCanvas = HTMLCanvasElement | OffscreenCanvas;
 
-interface TimestampQueue extends AsyncIterable<number>, AsyncIterator<number> {
-  push(timestamp: number): void;
-  close(): void;
-}
+// Encoder packet timestamps are rounded to microseconds; treat that representation noise as an exact boundary.
+const CANVAS_TIMESTAMP_EPSILON_SECONDS = 1 / 1_000_000;
+type TimestampedCanvasIterator = AsyncIterator<WrappedCanvas, void, unknown>;
 
-function createTimestampQueue(): TimestampQueue {
-  const values: number[] = [];
-  const waiters: Array<(result: IteratorResult<number>) => void> = [];
-  let closed = false;
+/** A look-ahead cursor over presentation-order frames, exposed separately for deterministic boundary tests. */
+export function createOrderedCanvasCursor(createIterator: () => TimestampedCanvasIterator) {
+  let iterator: TimestampedCanvasIterator | null = null;
+  let previous: WrappedCanvas | null = null;
+  let next: IteratorResult<WrappedCanvas, void> | null = null;
+  let lastRequestedTime = -Infinity;
+
+  const reset = async () => {
+    if (iterator?.return) await iterator.return().catch(() => undefined);
+    iterator = createIterator();
+    previous = null;
+    next = null;
+    lastRequestedTime = -Infinity;
+  };
+
   return {
-    [Symbol.asyncIterator]() { return this; },
-    next() {
-      if (values.length) return Promise.resolve({ value: values.shift()!, done: false });
-      if (closed) return Promise.resolve({ value: undefined, done: true });
-      return new Promise<IteratorResult<number>>((resolve) => waiters.push(resolve));
+    async getCanvasAt(sourceTimeSeconds: number): Promise<WrappedCanvas | null> {
+      if (!Number.isFinite(sourceTimeSeconds) || sourceTimeSeconds < 0) {
+        throw new RangeError('Source frame time must be a finite, non-negative number.');
+      }
+      if (!iterator || sourceTimeSeconds < lastRequestedTime) await reset();
+      lastRequestedTime = sourceTimeSeconds;
+      if (!next) next = await iterator!.next();
+      while (!next.done && next.value.timestamp <= sourceTimeSeconds + CANVAS_TIMESTAMP_EPSILON_SECONDS) {
+        previous = next.value;
+        next = await iterator!.next();
+      }
+      return previous && previous.timestamp <= sourceTimeSeconds + CANVAS_TIMESTAMP_EPSILON_SECONDS ? previous : null;
     },
-    return() {
-      closed = true;
-      for (const resolve of waiters.splice(0)) resolve({ value: undefined, done: true });
-      return Promise.resolve({ value: undefined, done: true });
-    },
-    push(timestamp) {
-      if (closed) throw new Error('Cannot request a frame from a closed decoder iterator.');
-      const resolve = waiters.shift();
-      if (resolve) resolve({ value: timestamp, done: false });
-      else values.push(timestamp);
-    },
-    close() {
-      closed = true;
-      values.length = 0;
-      for (const resolve of waiters.splice(0)) resolve({ value: undefined, done: true });
+    async dispose() {
+      if (iterator?.return) await iterator.return().catch(() => undefined);
+      iterator = null;
+      previous = null;
+      next = null;
     },
   };
 }
 
 export interface VideoFrameReader {
-  /** Returns the last presentation-order source frame whose timestamp is <= sourceTimeSeconds. */
+  /** Returns the last presentation-order source frame whose start timestamp is <= sourceTimeSeconds. */
   getCanvasAt(sourceTimeSeconds: number): Promise<WrappedCanvas | null>;
   dispose(): Promise<void>;
 }
 
 /**
  * Opens a browser-local Blob as a timestamp-addressable source. CanvasSink decodes actual presentation samples
- * and applies container rotation/display geometry before returning a canvas. Requests are streamed in timestamp
- * order so Mediabunny can reuse decoder work; a backwards source-time jump cleanly starts a new decoder iterator.
+ * and applies container rotation/display geometry before returning a canvas. Frames are streamed in presentation
+ * order with one-frame lookahead so exact timestamps still resolve without waiting for a later query.
  */
 export async function openVideoFrameReader(blob: Blob): Promise<VideoFrameReader> {
   const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
   try {
     const track = await input.getPrimaryVideoTrack();
     if (!track) throw new Error('The selected source contains no decodable video track.');
-    const sink = new CanvasSink(track, { alpha: false, poolSize: 1 });
-    let queue: TimestampQueue | null = null;
-    let iterator: AsyncGenerator<WrappedCanvas | null, void, unknown> | null = null;
-    let lastTimestamp = -Infinity;
-    const resetIterator = async () => {
-      queue?.close();
-      if (iterator) await iterator.return?.().catch(() => undefined);
-      queue = createTimestampQueue();
-      iterator = sink.canvasesAtTimestamps(queue);
-      lastTimestamp = -Infinity;
-    };
+    const sink = new CanvasSink(track, { alpha: false, poolSize: 2 });
+    const cursor = createOrderedCanvasCursor(() => sink.canvases());
     return {
-      async getCanvasAt(sourceTimeSeconds) {
-        if (!Number.isFinite(sourceTimeSeconds) || sourceTimeSeconds < 0) {
-          throw new RangeError('Source frame time must be a finite, non-negative number.');
-        }
-        if (!iterator || sourceTimeSeconds < lastTimestamp) await resetIterator();
-        lastTimestamp = sourceTimeSeconds;
-        const nextCanvas = iterator!.next();
-        queue!.push(sourceTimeSeconds);
-        const result = await nextCanvas;
-        return result.done ? null : result.value;
-      },
+      getCanvasAt: (sourceTimeSeconds) => cursor.getCanvasAt(sourceTimeSeconds),
       async dispose() {
-        queue?.close();
+        await cursor.dispose();
         input.dispose();
-        if (iterator) await iterator.return?.().catch(() => undefined);
-        iterator = null;
-        queue = null;
       },
     };
   } catch (error) {

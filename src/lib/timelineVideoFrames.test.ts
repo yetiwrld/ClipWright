@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { WrappedCanvas } from 'mediabunny';
 import type { TimelineClip, Track } from './projectDocument';
-import { drawLetterboxedVideoFrame, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
+import { createOrderedCanvasCursor, drawLetterboxedVideoFrame, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
 
 const lower: Track = { id: 'v1', name: 'Video 1', kind: 'video', muted: false, locked: false, clips: [] };
 const upper: Track = { id: 'v2', name: 'Video 2', kind: 'video', muted: false, locked: false, clips: [] };
@@ -26,6 +27,47 @@ describe('timeline video frame selection and draw policy', () => {
   it('maps a timeline time to the source timestamp using clip start and trim-in', () => {
     const trimmed = clip('trimmed', lower.id, 4, 12.5, 16.5);
     expect(sourceTimeForTimelineClip(trimmed, 5.25)).toBe(13.75);
+  });
+
+  it('resolves exact rounded frame timestamps with one-frame lookahead and resets on backward source time', async () => {
+    const frames: WrappedCanvas[] = Array.from({ length: 9 }, (_, index) => ({
+      canvas: { width: 16, height: 9 } as HTMLCanvasElement,
+      timestamp: Math.round(index / 30 * 1_000_000) / 1_000_000,
+      duration: 1 / 30,
+    }));
+    let iteratorCreations = 0;
+    let reads = 0;
+    const cursor = createOrderedCanvasCursor(() => {
+      iteratorCreations += 1;
+      let index = 0;
+      return {
+        next: async () => {
+          reads += 1;
+          return index < frames.length
+            ? { done: false as const, value: frames[index++] }
+            : { done: true as const, value: undefined };
+        },
+        return: async () => ({ done: true as const, value: undefined }),
+      };
+    });
+
+    const exactRationalTimestamp = 5 / 30;
+    expect(await cursor.getCanvasAt(exactRationalTimestamp)).toBe(frames[5]);
+    const readsAfterBoundary = reads;
+    expect(await cursor.getCanvasAt(exactRationalTimestamp)).toBe(frames[5]);
+    expect(reads).toBe(readsAfterBoundary);
+    expect(await cursor.getCanvasAt(1 / 30)).toBe(frames[1]);
+    expect(iteratorCreations).toBe(2);
+    await cursor.dispose();
+  });
+
+  it('returns null for a timestamp before the first source frame', async () => {
+    const cursor = createOrderedCanvasCursor(() => ({
+      next: async () => ({ done: false as const, value: { canvas: {} as HTMLCanvasElement, timestamp: 0.1, duration: 1 / 30 } }),
+      return: async () => ({ done: true as const, value: undefined }),
+    }));
+    expect(await cursor.getCanvasAt(0)).toBeNull();
+    await cursor.dispose();
   });
 
   it('clears every output frame to black and aspect-fits decoded source frames', () => {
