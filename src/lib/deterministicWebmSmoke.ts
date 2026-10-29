@@ -10,7 +10,9 @@ import {
   encodeDeterministicWebm,
   videoTimestampToleranceSeconds,
 } from './deterministicWebmExport';
+import type { ExportOutputStream } from './deterministicWebmExport';
 import { exportTimelineProject } from './timelineExport';
+import { runStillImageExportSmoke } from './stillImageExportSmoke';
 import { parseProjectDocument, serializeProjectDocument, validateProjectDocument } from './projectDocument';
 import type { MediaAsset, ProjectDocument, TimelineClip, Track } from './projectDocument';
 
@@ -24,6 +26,36 @@ const IDENTITY_AUDIO_PULSES = {
 } as const;
 type SmokeProgress = (stage: string) => void;
 const reportNoop: SmokeProgress = () => undefined;
+
+function requireExportBuffer(result: { buffer: ArrayBuffer | null }): ArrayBuffer {
+  if (!result.buffer) throw new Error('The browser export smoke requires the in-memory validation output.');
+  return result.buffer;
+}
+
+function createMemoryOutputStream(): ExportOutputStream & { getBuffer(): ArrayBuffer } {
+  const chunks: Array<{ position: number; data: Uint8Array }> = [];
+  let output: Uint8Array | null = null;
+  return {
+    writable: new WritableStream({
+      write: ({ position, data }) => { chunks.push({ position, data: new Uint8Array(data) }); },
+    }),
+    prepare: async () => {
+      const size = chunks.reduce((maximum, chunk) => Math.max(maximum, chunk.position + chunk.data.byteLength), 0);
+      output = new Uint8Array(size);
+      for (const chunk of chunks) output.set(chunk.data, chunk.position);
+      chunks.length = 0;
+      return size;
+    },
+    read: async (start, end) => {
+      if (!output || start < 0 || end <= start || end > output.byteLength) throw new Error('Smoke output read range is invalid.');
+      return output.slice(start, end);
+    },
+    getBuffer: () => {
+      if (!output) throw new Error('The streamed smoke output has not been prepared.');
+      return output.buffer;
+    },
+  };
+}
 
 function drawIdentityFrame(context: CanvasRenderingContext2D, sourceId: 'A' | 'B', frameIndex: number) {
   context.fillStyle = '#202020';
@@ -111,7 +143,7 @@ async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokePr
   if (!areExportFrameCountsExact(30, { ...result.counts, outputFilePackets: result.measurements.outputVideoPackets })) {
     throw new Error(`The ${sourceId} frame-identity source did not encode exactly 30 frames.`);
   }
-  return result.buffer;
+  return requireExportBuffer(result);
 }
 
 function makeTimelineIdentityFixture() {
@@ -315,8 +347,9 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       },
     };
 
-    stage = 'executing production saved-project timeline export';
+    stage = 'executing production saved-project timeline export through chunked target';
     reportProgress(stage);
+    const streamedOutput = createMemoryOutputStream();
     const result = await exportTimelineProject({
       projectSnapshot: savedProject,
       sourceBlobs,
@@ -324,6 +357,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       resolution: 'sequence',
       quality: 'standard',
       signal: new AbortController().signal,
+      outputStream: streamedOutput,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
       onProgress: (counts) => {
         if (counts.submitted && (counts.submitted % 10 === 0 || counts.submitted === plan.frameCount)) {
@@ -331,11 +365,12 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
         }
       },
     });
-    outputBuffer = result.buffer;
+    if (result.buffer !== null) throw new Error('The streamed production export unexpectedly retained a full output buffer.');
+    outputBuffer = streamedOutput.getBuffer();
 
     stage = 'independently checking decoded production export';
     reportProgress(stage);
-    const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress, 'production saved-project output');
+    const fileFrameIdentities = await inspectFrameIdentities(outputBuffer, reportProgress, 'production saved-project output');
     const timestampToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / result.measurements.videoTimeResolution);
     const mismatches = expectedFrameIdentities.flatMap((expected, index) => {
       const actual = fileFrameIdentities[index]?.identity;
@@ -359,7 +394,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       : result.measurements.outputAudioDurationSeconds - plan.durationSeconds;
     const audioDurationTolSeconds = audioDurationToleranceSeconds(48_000, OPUS_PACKET_DURATION_SECONDS, result.measurements.audioTimeResolution ? 1 / result.measurements.audioTimeResolution : WEBM_TIMEBASE_SECONDS);
     const containerDurationToleranceSeconds = Math.max(videoDurationToleranceSeconds, audioDurationTolSeconds);
-    const audioAnalysis = await measureTimelineAudioOnsets(result.buffer);
+    const audioAnalysis = await measureTimelineAudioOnsets(outputBuffer);
     const audioOnsetTolerance = audioOnsetToleranceSeconds(audioAnalysis.sampleRate, OPUS_PACKET_DURATION_SECONDS, result.measurements.audioTimeResolution ? 1 / result.measurements.audioTimeResolution : WEBM_TIMEBASE_SECONDS);
     const audioOnsetMatches = EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS.map((expectedSeconds, index) => {
       const actualSeconds = audioAnalysis.onsetsSeconds[index] ?? null;
@@ -519,14 +554,17 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       if (!mp4CancellationObserved) throw error;
     }
     if (!mp4CancellationObserved) throw new Error('Production MP4 cancellation did not abort before producing a file.');
-    stage = 'retrying production portrait H.264/AAC MP4 after cancellation';
+    stage = 'retrying production portrait H.264/AAC MP4 through a streamed target after cancellation';
     reportProgress(stage);
+    const streamedPortraitMp4 = createMemoryOutputStream();
     const portraitMp4 = await exportTimelineProject({
       projectSnapshot: portraitProject, sourceBlobs, sequenceId: portraitProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
+      outputStream: streamedPortraitMp4,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-export.mp4'] = arrayBufferToBase64(portraitMp4.buffer);
+    if (portraitMp4.buffer !== null) throw new Error('The streamed MP4 smoke unexpectedly retained a full output buffer.');
+    mp4Artifacts['timeline-export.mp4'] = arrayBufferToBase64(streamedPortraitMp4.getBuffer());
     mp4Production.push(summarizeProductionOutput('portrait-av-retry', portraitMp4, 180, 320, true, 'mp4'));
 
     stage = 'testing production video-only H.264 MP4';
@@ -537,7 +575,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-video-only.mp4'] = arrayBufferToBase64(videoOnlyMp4.buffer);
+    mp4Artifacts['timeline-video-only.mp4'] = arrayBufferToBase64(requireExportBuffer(videoOnlyMp4));
     mp4Production.push(summarizeProductionOutput('landscape-video-only', videoOnlyMp4, TEST_WIDTH, TEST_HEIGHT, false, 'mp4'));
 
     stage = 'testing custom-dimension MP4 and WebM production outputs';
@@ -548,7 +586,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-custom.mp4'] = arrayBufferToBase64(customMp4.buffer);
+    mp4Artifacts['timeline-custom.mp4'] = arrayBufferToBase64(requireExportBuffer(customMp4));
     mp4Production.push(summarizeProductionOutput('custom-234x146-video-only', customMp4, 234, 146, false, 'mp4', 'fill', '#142b40'));
     const customWebmProject = makeSizedProject(234, 146, true, 'stretch', '#1a3048');
     const customWebm = await exportTimelineProject({
@@ -556,7 +594,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       resolution: 'sequence', quality: 'standard', container: 'webm', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-custom.webm'] = arrayBufferToBase64(customWebm.buffer);
+    mp4Artifacts['timeline-custom.webm'] = arrayBufferToBase64(requireExportBuffer(customWebm));
     mp4Production.push(summarizeProductionOutput('custom-234x146-webm-video-only', customWebm, 234, 146, false, 'webm', 'stretch', '#1a3048'));
     if (mp4Production.length !== 4 || mp4Production.some((check) => check.passed !== true)) throw new Error('Required production MP4/WebM dimension and track coverage is incomplete.');
     if (!fixtureMetadata) throw new Error('The fixture manifest is unavailable for production MP4 evidence.');
@@ -595,7 +633,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       'source-B.webm': sourceBase64.B,
       'saved-project.json': stringToBase64(projectSnapshot),
       'fixture.json': stringToBase64(JSON.stringify(fixtureMetadata, null, 2)),
-      'timeline-export.webm': arrayBufferToBase64(result.buffer),
+      'timeline-export.webm': arrayBufferToBase64(requireExportBuffer(result)),
     };
     return { report, artifacts };
   } catch (error) {
@@ -723,7 +761,7 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
   const videoDelta = result.measurements.outputVideoDurationSeconds - expectedDuration;
   const audioDelta = result.measurements.outputAudioDurationSeconds === null ? null : result.measurements.outputAudioDurationSeconds - expectedDuration;
   const containerDelta = result.measurements.outputContainerDurationSeconds - expectedDuration;
-  const avOffset = await measureDecodedAvOffset(result.buffer);
+  const avOffset = await measureDecodedAvOffset(requireExportBuffer(result));
   const expectedAvOffsetSeconds = audioPulseStartSeconds - videoFlashTimestampSeconds;
   const avOffsetErrorSeconds = avOffset.audioMinusVideoOffsetSeconds - expectedAvOffsetSeconds;
   const countsMatch = areExportFrameCountsExact(plan.frameCount, {
@@ -775,12 +813,26 @@ export async function runDeterministicWebmSmoke(reportProgress: SmokeProgress = 
   const audio = await runAudioDurationSmoke(reportProgress);
   reportProgress('audio duration smoke complete; starting frame identity fixture');
   const frameIdentity = await runFrameIdentitySmoke(reportProgress);
-  reportProgress('all packaged WebM smoke checks complete');
+  let stillImage: { pass: boolean; [key: string]: unknown };
+  let stillImageArtifacts: Record<string, string> = {};
+  try {
+    const stillImageResult = await runStillImageExportSmoke(reportProgress);
+    stillImage = stillImageResult;
+    stillImageArtifacts = stillImageResult.artifacts;
+  } catch (error) {
+    stillImage = {
+      pass: false,
+      fixture: 'single-image-clip',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  reportProgress('all packaged WebM, MP4, and still-image export smoke checks complete');
   return {
     ...audio,
     audioDurationSmokePass: audio.pass,
-    pass: audio.pass && frameIdentity.report.pass,
+    pass: audio.pass && frameIdentity.report.pass && stillImage.pass === true,
     frameIdentity: frameIdentity.report,
-    artifacts: frameIdentity.artifacts,
+    stillImageExport: stillImage,
+    artifacts: { ...frameIdentity.artifacts, ...stillImageArtifacts },
   };
 }

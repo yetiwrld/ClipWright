@@ -64,7 +64,12 @@ declare global {
       exportFiles: {
         getDefaultFolder(): Promise<{ canceled: true } | { canceled: false; handle: string; folderName: string }>;
         chooseFolder(): Promise<{ canceled: true } | { canceled: false; handle: string; folderName: string }>;
-        save(payload: { handle: string; fileName: string; extension: 'mp4' | 'webm'; bytes: Uint8Array }): Promise<{ fileName: string; folderName: string; fileHandle: string; sizeBytes: number }>;
+        begin(payload: { handle: string; fileName: string; extension: 'mp4' | 'webm'; expectedSizeBytes: number }): Promise<{ id: string }>;
+        write(payload: { id: string; position: number; bytes: Uint8Array }): Promise<{ written: number }>;
+        prepare(id: string): Promise<{ sizeBytes: number }>;
+        read(payload: { id: string; start: number; end: number }): Promise<Uint8Array>;
+        commit(id: string): Promise<{ fileName: string; folderName: string; fileHandle: string; sizeBytes: number }>;
+        abort(id: string): Promise<{ aborted: true }>;
         openFolder(fileHandle: string): Promise<{ opened: true }>;
       };
       projectFiles: {

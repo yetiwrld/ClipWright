@@ -3,7 +3,7 @@ import type { WrappedCanvas } from 'mediabunny';
 import type { TimelineClip, Track } from './projectDocument';
 import { clipEnd } from './timelineOperations';
 
-export type TimelineCanvas = HTMLCanvasElement | OffscreenCanvas;
+export type TimelineCanvas = HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
 
 // Encoder packet timestamps are rounded to microseconds; treat that representation noise as an exact boundary.
 export const CANVAS_TIMESTAMP_EPSILON_SECONDS = 1 / 1_000_000;

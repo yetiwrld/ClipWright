@@ -205,6 +205,69 @@ describe('ClipWright foundation UI', () => {
     expect(shell.classList.contains('is-editor-focus')).toBe(false);
   });
 
+  it('imports, previews, places, and duration-edits a still image without embedding its bytes', async () => {
+    const project = createProject('Image timeline test', '16:9', 30, new Date('2025-01-01T00:00:00.000Z'));
+    const document = createProjectDocument(project, '0.1.0');
+    writeProjects(window.localStorage, [project]);
+    writeProjectDocuments(window.localStorage, [document]);
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 1600, height: 900, close: vi.fn() } as unknown as ImageBitmap)));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: `Open ${project.name}` }));
+    expect(await screen.findByRole('slider', { name: 'Timeline zoom level' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Import a local image' }));
+    const imageFile = new File(['local image bytes'], 'still.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText('Choose a local image file'), { target: { files: [imageFile] } });
+    expect(await screen.findByText('still.png')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Add at playhead' }));
+    expect(await screen.findByRole('img', { name: 'Timeline image: still.png' })).toBeTruthy();
+
+    const duration = screen.getByLabelText('Clip duration (seconds)');
+    fireEvent.change(duration, { target: { value: '3.5' } });
+    expect((duration as HTMLInputElement).value).toBe('3.5');
+    fireEvent.click(screen.getByRole('button', { name: 'Set duration' }));
+    expect(await screen.findByText('Updated still-image duration.')).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0];
+      expect(saved.sequences[0].tracks[0].clips[0]).toMatchObject({ sourceId: saved.assets[0].id, trimIn: 0, trimOut: 3.5 });
+    });
+    fireEvent.change(screen.getByLabelText('Seek timeline'), { target: { value: '3.5' } });
+    await waitFor(() => expect(screen.queryByRole('img', { name: 'Timeline image: still.png' })).toBeNull());
+    fireEvent.change(screen.getByLabelText('Seek timeline'), { target: { value: '2' } });
+    expect(await screen.findByRole('img', { name: 'Timeline image: still.png' })).toBeTruthy();
+    expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).not.toContain('blob:');
+  });
+
+  it('autosaves only the document that changed in the desktop library', async () => {
+    const projects = ['Autosave one', 'Autosave two', 'Autosave three'].map((name) => createProject(name, '16:9', 30, new Date('2025-01-01T00:00:00.000Z')));
+    const documents = projects.map((project) => createProjectDocument(project, '0.1.0'));
+    writeProjects(window.localStorage, projects);
+    writeProjectDocuments(window.localStorage, documents);
+    window.localStorage.setItem('clipwright.preferences.v1', JSON.stringify({ storage: { autosaveIntervalSeconds: 1 } }));
+    const library = {
+      initialize: vi.fn(async () => ({ root: '/local/clipwright', directories: {}, projects: [], issues: [] })),
+      saveProject: vi.fn(async (_request: { contents: string }) => ({ changed: true, recoveryId: null, documentId: 'autosave', contentHash: 'hash', projectId: 'autosave' })),
+      resolveMedia: vi.fn(async (_projectId: string) => []),
+    };
+    Object.defineProperty(window, 'clipwright', { configurable: true, value: { library } });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: `Open ${projects[0].name}` }));
+    expect(await screen.findByRole('slider', { name: 'Timeline zoom level' })).toBeTruthy();
+    await waitFor(() => expect(library.resolveMedia).toHaveBeenCalledWith(projects[0].id));
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 1200)));
+    library.saveProject.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mute Video 1' }));
+    await waitFor(() => expect(library.saveProject).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 1200)));
+    expect(library.saveProject).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(library.saveProject.mock.calls[0][0].contents).id).toBe(projects[0].id);
+    const browserDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    const changedDocument = browserDocuments.find((document: { id: string }) => document.id === projects[0].id);
+    expect(changedDocument.sequences[0].tracks.find((track: { name: string }) => track.name === 'Video 1').muted).toBe(true);
+  });
+
   it('creates custom canvases and persists exact dimensions, composition, and background settings', async () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));

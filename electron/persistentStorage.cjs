@@ -4,10 +4,12 @@ const path = require('node:path');
 const { createReadStream, createWriteStream } = require('node:fs');
 const { pipeline } = require('node:stream/promises');
 const { parseProjectEnvelope, readProjectFile, writeProjectFile } = require('./projectFiles.cjs');
+const { prefixWindowsReservedName } = require('./fileNames.cjs');
 
 const ROOT_DIRECTORIES = ['Projects', 'Exports', 'Thumbnails', 'Cache', 'Diagnostics', 'Settings'];
 const MANIFEST_NAME = 'project.cwproject';
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/;
+const verifiedLinkedFiles = new Map();
 
 function applicationDataRoot(userDataPath) {
   if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) throw new Error('Electron userData path must be an absolute per-user path.');
@@ -30,7 +32,8 @@ function isWithin(parent, candidate) {
 
 function safeBaseName(name) {
   const normalized = path.basename(String(name || 'media')).normalize('NFC');
-  return normalized.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').slice(0, 180) || 'media';
+  const safeName = normalized.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').slice(0, 180) || 'media';
+  return prefixWindowsReservedName(safeName).slice(0, 180) || 'media';
 }
 
 async function ensureDirectoryIsReal(directory) {
@@ -103,15 +106,18 @@ async function importMedia({ root, projectId, assetId, sourcePath, mode }) {
     if (copiedInfo.size !== source.sizeBytes || copiedFingerprint !== fingerprint || sourceAfterCopy.size !== source.sizeBytes || sourceAfterCopy.mtimeMs !== source.modifiedAt) {
       throw new Error('The source changed while it was being copied. No managed asset was registered.');
     }
-    try { await fs.link(temporaryPath, destinationPath); }
-    catch (error) {
+    let linkedVerifiedTemporary = false;
+    try {
+      await fs.link(temporaryPath, destinationPath);
+      linkedVerifiedTemporary = true;
+    } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
       const duplicate = await fs.stat(destinationPath);
       if (!duplicate.isFile() || duplicate.size !== source.sizeBytes || await hashFile(destinationPath) !== fingerprint) throw new Error('A managed media filename collision was detected; the existing asset was left untouched.');
     }
     const finalInfo = await fs.stat(destinationPath);
-    if (!finalInfo.isFile() || finalInfo.size !== source.sizeBytes || await hashFile(destinationPath) !== fingerprint) {
-      await fs.unlink(destinationPath).catch(() => undefined);
+    if (!finalInfo.isFile() || finalInfo.size !== source.sizeBytes || (!linkedVerifiedTemporary && await hashFile(destinationPath) !== fingerprint)) {
+      if (linkedVerifiedTemporary) await fs.unlink(destinationPath).catch(() => undefined);
       throw new Error('The managed copy failed verification and was not registered.');
     }
   } finally {
@@ -125,6 +131,7 @@ async function resolveAssetPath({ root, projectId, asset }) {
   let filePath;
   if (asset.pathKind === 'absolute') {
     if (!path.isAbsolute(asset.sourcePath)) throw new Error('Linked media path is not absolute.');
+    if (typeof asset.fingerprint !== 'string') return { available: false, reason: 'The linked media has no fingerprint; relink it to confirm the file.' };
     filePath = path.resolve(asset.sourcePath);
   } else if (asset.pathKind === 'project-relative') {
     if (path.isAbsolute(asset.sourcePath) || asset.sourcePath.includes('\0')) throw new Error('Managed media path must be project-relative.');
@@ -159,8 +166,16 @@ async function resolveAssetPath({ root, projectId, asset }) {
     }
     const stat = await fs.stat(filePath);
     if (!stat.isFile()) return { available: false, reason: 'The media source is not a regular file.' };
+    if (asset.pathKind === 'absolute' && typeof asset.fingerprint === 'string') {
+      const cached = verifiedLinkedFiles.get(filePath);
+      if (cached?.sizeBytes === stat.size && cached.modifiedAt === stat.mtimeMs && cached.fingerprint === asset.fingerprint) {
+        return { available: true, filePath, sizeBytes: stat.size };
+      }
+      const fingerprint = await hashFile(filePath);
+      if (fingerprint !== asset.fingerprint) return { available: false, reason: 'The linked source contents changed; confirm the replacement by relinking.' };
+      verifiedLinkedFiles.set(filePath, { sizeBytes: stat.size, modifiedAt: stat.mtimeMs, fingerprint });
+    }
     if (asset.fileSizeBytes !== undefined && stat.size !== asset.fileSizeBytes) return { available: false, reason: 'The media file size changed; confirm the replacement by relinking.' };
-    if (asset.pathKind === 'absolute' && typeof asset.fingerprint === 'string' && await hashFile(filePath) !== asset.fingerprint) return { available: false, reason: 'The linked source contents changed; confirm the replacement by relinking.' };
     return { available: true, filePath, sizeBytes: stat.size };
   } catch (error) {
     if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'ENODEV'].includes(error?.code)) return { available: false, reason: 'The media source is missing or inaccessible.' };
@@ -310,14 +325,31 @@ async function createProjectBackup({ root, projectId, destinationDirectory, incl
         externalNotCollected.push({ assetId: asset.id, name: asset.name, reason: resolved.reason });
         continue;
       }
-      const fingerprint = asset.fingerprint || await hashFile(resolved.filePath);
+      const fingerprint = await hashFile(resolved.filePath);
+      if (asset.fingerprint && asset.fingerprint !== fingerprint) {
+        externalNotCollected.push({ assetId: asset.id, name: asset.name, reason: 'The source contents do not match the saved fingerprint; relink the media to verify it.' });
+        continue;
+      }
       const name = `${fingerprint.slice(0, 20)}-${safeBaseName(asset.name)}`;
-      let destination = path.join(mediaDirectory, name);
+      let destination = path.resolve(mediaDirectory, name);
+      if (!isWithin(mediaDirectory, destination) || destination === mediaDirectory) throw new Error('Backup media destination escapes its temporary media directory.');
       if (copied.has(fingerprint)) destination = copied.get(fingerprint);
       else {
-        await fs.copyFile(resolved.filePath, destination, require('node:fs').constants.COPYFILE_EXCL);
-        if (await hashFile(destination) !== fingerprint) throw new Error(`Backup verification failed for ${asset.name}.`);
-        copied.set(fingerprint, destination);
+        const copyTemporaryPath = path.join(mediaDirectory, `.${crypto.randomUUID()}.copying`);
+        let destinationCreated = false;
+        try {
+          await fs.copyFile(resolved.filePath, copyTemporaryPath, require('node:fs').constants.COPYFILE_EXCL);
+          if (await hashFile(copyTemporaryPath) !== fingerprint) throw new Error(`Backup verification failed for ${asset.name}.`);
+          await fs.link(copyTemporaryPath, destination);
+          destinationCreated = true;
+          if (await hashFile(destination) !== fingerprint) throw new Error(`Backup verification failed for ${asset.name}.`);
+          copied.set(fingerprint, destination);
+        } catch (error) {
+          if (destinationCreated && isWithin(mediaDirectory, destination)) await fs.unlink(destination).catch(() => undefined);
+          throw error;
+        } finally {
+          await fs.unlink(copyTemporaryPath).catch(() => undefined);
+        }
       }
       asset.sourcePath = path.posix.join('Media', path.basename(destination));
       asset.pathKind = 'project-relative';
@@ -404,5 +436,6 @@ module.exports = {
   projectDirectory,
   resolveAssetPath,
   restoreProjectBackup,
+  safeBaseName,
   saveLibraryProject,
 };

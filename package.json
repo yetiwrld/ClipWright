@@ -11,13 +11,14 @@
     "npm": ">=10"
   },
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "vite --host 127.0.0.1",
+    "dev:lan": "vite --config vite.lan.config.ts",
     "build": "tsc -b && vite build && vite build --config vite.validation.config.ts && vite build --config vite.smoke.config.ts",
-    "preview": "vite preview --host 0.0.0.0",
+    "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
     "test:watch": "vitest",
     "qa:ui": "npm test -- --reporter=dot && npm run build",
-    "test:desktop": "node --test electron/security.test.cjs electron/projectFiles.test.cjs electron/exportFiles.test.cjs electron/persistentStorage.test.cjs electron/mediaProtocol.test.cjs",
+    "test:desktop": "node --test electron/security.test.cjs electron/projectFiles.test.cjs electron/exportFiles.test.cjs electron/fileNames.test.cjs electron/persistentStorage.test.cjs electron/mediaProtocol.test.cjs",
     "desktop:dev": "concurrently -k -s last \"vite --host 127.0.0.1 --port 5174 --strictPort\" \"wait-on tcp:127.0.0.1:5174 && cross-env CLIPWRIGHT_RENDERER_URL=http://127.0.0.1:5174 electron .\"",
     "desktop:preview": "npm run build && electron .",
     "desktop:smoke": "npm run build && cross-env CLIPWRIGHT_SMOKE_TEST=1 electron .",

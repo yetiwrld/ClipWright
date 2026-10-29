@@ -84,6 +84,7 @@ jobs:
               $short = [ordered]@{
                 audioDurationSmokePass = $failed.audioDurationSmokePass
                 frameIdentityPass = $frame.pass
+                stillImageExport = $failed.stillImageExport
                 stage = $frame.stage
                 error = $frame.error
                 requiredMp4Coverage = $frame.requiredMp4Coverage
@@ -108,7 +109,10 @@ jobs:
           if (-not $report.pass) {
             throw "Packaged production-export validation failed: $($report | ConvertTo-Json -Depth 10 -Compress)"
           }
-          foreach ($requiredFile in @('source-A.webm', 'source-B.webm', 'saved-project.json', 'fixture.json', 'timeline-export.webm', 'timeline-export.mp4', 'timeline-video-only.mp4', 'timeline-custom.mp4', 'timeline-custom.webm')) {
+          if (-not $report.stillImageExport.pass -or -not $report.stillImageExport.outputs.webm.passed -or -not $report.stillImageExport.outputs.mp4.passed) {
+            throw "Packaged still-image export validation failed: $($report.stillImageExport | ConvertTo-Json -Depth 10 -Compress)"
+          }
+          foreach ($requiredFile in @('source-A.webm', 'source-B.webm', 'saved-project.json', 'fixture.json', 'timeline-export.webm', 'timeline-export.mp4', 'timeline-video-only.mp4', 'timeline-custom.mp4', 'timeline-custom.webm', 'timeline-still-image.webm', 'timeline-still-image.mp4')) {
             if (-not (Test-Path (Join-Path $artifactDirectory $requiredFile))) { throw "Required production-export artifact missing: $requiredFile" }
           }
           @"
@@ -118,6 +122,7 @@ jobs:
           - Independent FFmpeg/ffprobe checks compare all video frames, PTS, identity pixels, all seven audio pulse onsets, A/V sync, and track/container durations with explicit tolerances.
           - Video tolerance: $($report.frameIdentity.expected.videoTimestampToleranceSeconds)s; audio duration: $($report.frameIdentity.expected.audioDurationToleranceSeconds)s; A/V onset: $($report.frameIdentity.expected.audioOnsetToleranceSeconds)s.
           - Required production MP4/WebM coverage (real encoders and muxers; no codec-capability skip): $($report.frameIdentity.mp4Production | ConvertTo-Json -Compress -Depth 7).
+          - Still-image production export: the packaged path streamed WebM and MP4 from a synthetic PNG clip, independently decoded all 12 frames in each container, and checked frame timing, dimensions, and center-pixel color: $($report.stillImageExport.outputs | ConvertTo-Json -Compress -Depth 7).
           - MP4 cancellation cleanup followed by a successful portrait H.264/AAC retry: $($report.frameIdentity.mp4CancellationThenRetryPassed).
           - Unsupported odd-canvas MP4 config was rejected through the production path without resize/fallback: $($report.frameIdentity.requiredMp4Coverage.unsupportedConfigurationRejected); evidence: $($report.frameIdentity.actual.unsupportedMp4Configuration | ConvertTo-Json -Compress -Depth 5).
           - Runtime: Electron $($report.runtime.electronVersion), Chromium $($report.runtime.chromiumVersion), Node $($report.runtime.nodeVersion); WebCodecs backend mode exposed by API: $($report.runtime.actualHardwareSoftwareBackend).
@@ -217,6 +222,7 @@ jobs:
           - WebM video/audio codec: $($independent.codec.video) / $($independent.codec.audio); synthetic source full-decode checks: $($independent.syntheticSources.A.fullDecode), $($independent.syntheticSources.B.fullDecode).
           - Runtime: Electron $($independent.runtime.electronVersion), Chromium $($independent.runtime.chromiumVersion); WebCodecs hardware/software backend is not exposed.
           - Timing: video $($independent.timing.videoDurationSeconds)s, decoded audio $($independent.timing.audioDecodedDurationSeconds)s, container $($independent.timing.containerDurationSeconds)s; tolerances video $($independent.timing.videoTimestampToleranceSeconds)s, audio $($independent.timing.audioDurationToleranceSeconds)s, container $($independent.timing.containerDurationToleranceSeconds)s, A/V onset $($independent.timing.audioOnsetToleranceSeconds)s.
+          - Still-image outputs: independent FFmpeg/ffprobe full decode, exact 12-frame timing/dimensions, no audio track, and magenta center-pixel checks: $($independent.stillImageOutputs | ConvertTo-Json -Compress -Depth 7).
           - Content: $($independent.content.identityFramesCompared) independently decoded frame identities; $($independent.content.mismatchCount) mismatches; flash frames $($independent.content.syncFlashIndexes).
           - Encoder configurations are WebCodecs effective configuration; physical hardware encoder is not asserted (hardwareAcceleration is only a preference).
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

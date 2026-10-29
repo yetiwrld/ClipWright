@@ -5,16 +5,18 @@ import {
   BufferSource,
   BufferTarget,
   CanvasSink,
+  CustomSource,
   CanvasSource,
   EncodedPacketSink,
   Input,
   Mp4OutputFormat,
   Output,
+  StreamTarget,
   WebMOutputFormat,
   canEncodeAudio,
   canEncodeVideo,
 } from 'mediabunny';
-import type { VideoTrackMetadata } from 'mediabunny';
+import type { StreamTargetChunk, VideoTrackMetadata } from 'mediabunny';
 import { frameDurationMicroseconds, frameTimestampMicroseconds, MICROSECONDS_PER_SECOND } from './frameTime';
 import type { RationalFrameRate } from './frameTime';
 
@@ -125,6 +127,12 @@ export interface EncodedFileMeasurements {
   mimeType: string;
 }
 
+export interface ExportOutputStream {
+  writable: WritableStream<StreamTargetChunk>;
+  prepare(): Promise<number>;
+  read(start: number, end: number): Promise<Uint8Array>;
+}
+
 export interface DeterministicWebmOptions {
   canvas: HTMLCanvasElement;
   plan: SequenceExportPlan;
@@ -133,6 +141,7 @@ export interface DeterministicWebmOptions {
   audioSampleRate?: number;
   includeAudio: boolean;
   signal: AbortSignal;
+  outputStream?: ExportOutputStream;
   hardwareAcceleration?: VideoEncoderConfig['hardwareAcceleration'];
   onEncoderConfig?(config: VideoEncoderConfig): void;
   onAudioEncoderConfig?(config: AudioEncoderConfig): void;
@@ -143,7 +152,8 @@ export interface DeterministicWebmOptions {
 }
 
 export interface DeterministicWebmResult {
-  buffer: ArrayBuffer;
+  /** Present for browser downloads; desktop exports stream to their temporary file and return null here. */
+  buffer: ArrayBuffer | null;
   counts: FramePipelineCounts & { encoded: number };
   measurements: EncodedFileMeasurements;
 }
@@ -341,8 +351,11 @@ async function encodeDeterministicContainer(options: DeterministicWebmOptions, c
   }
   if (options.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
 
-  const target = new BufferTarget();
-  const format = container === 'mp4' ? new Mp4OutputFormat({ fastStart: 'in-memory' }) : new WebMOutputFormat();
+  const target = options.outputStream
+    ? new StreamTarget(options.outputStream.writable, { chunked: true, chunkSize: 8 * 1024 * 1024 })
+    : new BufferTarget();
+  // Desktop MP4 output uses regular, non-fast-start MP4 so muxing stays streaming without an in-memory moov rewrite.
+  const format = container === 'mp4' ? new Mp4OutputFormat({ fastStart: options.outputStream ? false : 'in-memory' }) : new WebMOutputFormat();
   const output = new Output({ format, target });
   let encoded = 0;
   const counts: FramePipelineCounts = { requested: 0, rendered: 0, submitted: 0 };
@@ -350,6 +363,8 @@ async function encodeDeterministicContainer(options: DeterministicWebmOptions, c
   const expectedProbes: ExpectedVideoProbe[] = [];
   let validationStage = 'encoding and muxing WebM';
   let finalizedMeasurements: EncodedFileMeasurements | null = null;
+  let outputBuffer: ArrayBuffer | null = null;
+  let outputSizeBytes: number | null = null;
   let videoEncoderConfiguration: EncoderConfigDiagnostic | null = null;
   let audioEncoderConfiguration: EncoderConfigDiagnostic | null = null;
   const videoSource = new CanvasSource(options.canvas, {
@@ -413,11 +428,37 @@ async function encodeDeterministicContainer(options: DeterministicWebmOptions, c
     if (options.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
     await output.finalize();
     if (options.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
-    if (!target.buffer || target.buffer.byteLength === 0) throw new Error(`The ${container.toUpperCase()} muxer finalized without producing a non-empty output file.`);
+    let inspectionSource: BufferSource | CustomSource;
+    if (options.outputStream) {
+      outputSizeBytes = await options.outputStream.prepare();
+      if (outputSizeBytes < 1) throw new Error(`The ${container.toUpperCase()} muxer finalized without producing a non-empty output file.`);
+      inspectionSource = new CustomSource({
+        getSize: () => outputSizeBytes!,
+        read: (start, end) => {
+          let position = start;
+          return new ReadableStream<Uint8Array>({
+            pull: async (controller) => {
+              if (position >= end) { controller.close(); return; }
+              const nextEnd = Math.min(end, position + 8 * 1024 * 1024);
+              const bytes = await options.outputStream!.read(position, nextEnd);
+              if (bytes.byteLength !== nextEnd - position) throw new Error('The streamed export returned an incomplete validation range.');
+              position = nextEnd;
+              controller.enqueue(bytes);
+            },
+          });
+        },
+        maxCacheSize: 8 * 1024 * 1024,
+      });
+    } else {
+      outputBuffer = target instanceof BufferTarget ? target.buffer : null;
+      if (!outputBuffer || outputBuffer.byteLength === 0) throw new Error(`The ${container.toUpperCase()} muxer finalized without producing a non-empty output file.`);
+      outputSizeBytes = outputBuffer.byteLength;
+      inspectionSource = new BufferSource(outputBuffer);
+    }
 
     validationStage = `checking finalized ${container.toUpperCase()} packets, timestamps, decoded samples, and required tracks`;
     options.onValidationStage?.(validationStage);
-    const measurements = await inspectEncodedMedia(target.buffer, {
+    const measurements = await inspectEncodedMediaSource(inspectionSource, {
       plan: options.plan,
       expectedVideoProbes: expectedProbes,
       requireAudioTrack: options.includeAudio,
@@ -477,7 +518,7 @@ async function encodeDeterministicContainer(options: DeterministicWebmOptions, c
     if (options.includeAudio && (measurements.outputAudioPackets === null || measurements.outputAudioDurationSeconds === null || measurements.decodedAudioSampleBuffers < 1)) {
       throw new Error(`Audio was included in this export, but the finalized ${container.toUpperCase()} is missing a readable audio track or decoded audio samples.`);
     }
-    return { buffer: target.buffer, counts: { ...counts, encoded }, measurements };
+    return { buffer: outputBuffer, counts: { ...counts, encoded }, measurements };
   } catch (error) {
     await output.cancel().catch(() => undefined);
     const isAbort = error instanceof DOMException && error.name === 'AbortError';
@@ -487,7 +528,7 @@ async function encodeDeterministicContainer(options: DeterministicWebmOptions, c
           stage: validationStage,
           counts: { ...counts, encoded },
           measurements: finalizedMeasurements,
-          outputBytes: target.buffer?.byteLength ?? null,
+          outputBytes: outputSizeBytes,
           expectedFrames: options.plan.frameCount,
           expectedDurationSeconds: options.plan.durationSeconds,
           includeAudio: options.includeAudio,
@@ -513,7 +554,14 @@ export async function inspectEncodedMedia(
   options: { plan?: SequenceExportPlan; expectedVideoProbes?: ExpectedVideoProbe[]; requireAudioTrack?: boolean; container: 'webm' | 'mp4'; expectedDimensions?: { width: number; height: number } },
 ): Promise<EncodedFileMeasurements> {
   if (buffer.byteLength === 0) throw new Error(`The finalized ${options.container.toUpperCase()} is empty.`);
-  const input = new Input({ source: new BufferSource(buffer), formats: ALL_FORMATS });
+  return inspectEncodedMediaSource(new BufferSource(buffer), options);
+}
+
+async function inspectEncodedMediaSource(
+  source: BufferSource | CustomSource,
+  options: { plan?: SequenceExportPlan; expectedVideoProbes?: ExpectedVideoProbe[]; requireAudioTrack?: boolean; container: 'webm' | 'mp4'; expectedDimensions?: { width: number; height: number } },
+): Promise<EncodedFileMeasurements> {
+  const input = new Input({ source, formats: ALL_FORMATS });
   try {
     const videoTrack = await input.getPrimaryVideoTrack();
     if (!videoTrack) throw new Error(`The finalized ${options.container.toUpperCase()} file contains no readable video track.`);

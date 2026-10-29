@@ -1,11 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const {
   MANIFEST_NAME, applicationDataRoot, archiveLibraryProject, clearCache, cloneLibraryProject, createProjectBackup,
-  ensureStorageLayout, importMedia, listLibraryProjects, projectDirectory, resolveAssetPath,
+  ensureStorageLayout, importMedia, listLibraryProjects, projectDirectory, resolveAssetPath, safeBaseName,
   restoreProjectBackup, saveLibraryProject,
 } = require('./persistentStorage.cjs');
 
@@ -29,6 +30,13 @@ function document(id = 'project-test-123') {
 }
 
 const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
+
+test('sanitizes managed-media and backup names that are reserved on Windows', () => {
+  assert.equal(safeBaseName('CON'), '_CON');
+  assert.equal(safeBaseName('nul.mp4'), '_nul.mp4');
+  assert.equal(safeBaseName('aux. '), '_aux');
+  assert.equal(safeBaseName('console.txt'), 'console.txt');
+});
 
 test('uses Electron userData and creates a separate, lazily initialized storage tree', async (t) => {
   const userData = await tempRoot(t);
@@ -92,7 +100,9 @@ test('linked media stores an absolute locator and detects a missing or changed s
   assert.equal(linked.pathKind, 'absolute');
   assert.equal(linked.sourcePath, source);
   assert.equal((await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked })).available, true);
+  const beforeChange = await fs.stat(source);
   await fs.writeFile(source, Buffer.alloc(linked.fileSizeBytes, 0x78));
+  await fs.utimes(source, beforeChange.atime, new Date(beforeChange.mtimeMs + 5000));
   const changed = await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked });
   assert.equal(changed.available, false);
   assert.match(changed.reason, /contents changed/);
@@ -100,6 +110,70 @@ test('linked media stores an absolute locator and detects a missing or changed s
   const missing = await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked });
   assert.equal(missing.available, false);
   assert.match(missing.reason, /missing/);
+});
+
+test('absolute linked assets without a fingerprint are unavailable', async (t) => {
+  const root = await tempRoot(t);
+  const source = path.join(root, 'unverified linked source.mp4');
+  await fs.writeFile(source, 'unverified legacy fixture');
+  const result = await resolveAssetPath({
+    root,
+    projectId: 'project-test-123',
+    asset: { id: 'asset-no-fingerprint', pathKind: 'absolute', sourcePath: source, fileSizeBytes: (await fs.stat(source)).size },
+  });
+  assert.deepEqual(result, { available: false, reason: 'The linked media has no fingerprint; relink it to confirm the file.' });
+});
+
+test('linked media caches verified fingerprints per unchanged path, size, and mtime', async (t) => {
+  const root = await tempRoot(t);
+  const source = path.join(root, 'cached linked source.mp4');
+  await fs.writeFile(source, 'linked fixture');
+  const linked = await importMedia({ root, projectId: 'project-test-123', assetId: 'asset-cached', sourcePath: source, mode: 'linked' });
+  const originalCreateHash = crypto.createHash;
+  let hashes = 0;
+  crypto.createHash = function countedCreateHash(...args) {
+    if (args[0] === 'sha256') hashes += 1;
+    return originalCreateHash.apply(this, args);
+  };
+  t.after(() => { crypto.createHash = originalCreateHash; });
+
+  assert.equal((await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked })).available, true);
+  assert.equal(hashes, 1);
+  assert.equal((await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked })).available, true);
+  assert.equal(hashes, 1, 'unchanged linked files should use the verified in-memory fingerprint');
+
+  const stat = await fs.stat(source);
+  const changedMtime = stat.mtimeMs + 5000;
+  await fs.utimes(source, stat.atime, new Date(changedMtime));
+  assert.equal((await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked })).available, true);
+  assert.equal(hashes, 2, 'a changed mtime must force a full hash');
+
+  await fs.writeFile(source, 'linked fixture changed size');
+  const changedSize = await resolveAssetPath({ root, projectId: 'project-test-123', asset: linked });
+  assert.equal(changedSize.available, false);
+  assert.match(changedSize.reason, /contents changed/);
+  assert.equal(hashes, 3, 'a changed size must force a full hash before reporting changed contents');
+});
+
+test('fresh managed-media imports hash the verified temporary copy only once and preserve integrity checks', async (t) => {
+  const root = await tempRoot(t);
+  const source = path.join(root, 'managed integrity.mp4');
+  await fs.writeFile(source, 'managed integrity fixture');
+  const originalCreateHash = crypto.createHash;
+  let hashes = 0;
+  crypto.createHash = function countedCreateHash(...args) {
+    if (args[0] === 'sha256') hashes += 1;
+    return originalCreateHash.apply(this, args);
+  };
+  t.after(() => { crypto.createHash = originalCreateHash; });
+
+  const imported = await importMedia({ root, projectId: 'project-test-123', assetId: 'asset-integrity', sourcePath: source, mode: 'managed' });
+  assert.equal(hashes, 3, 'two media hashes (source and copied temp) plus the project-folder ID hash; the new hard link is already those verified bytes');
+  const managedPath = path.join(projectDirectory(root, 'project-test-123'), imported.sourcePath);
+  await fs.writeFile(managedPath, Buffer.alloc(imported.fileSizeBytes, 0x78));
+  const resolved = await resolveAssetPath({ root, projectId: 'project-test-123', asset: imported });
+  assert.equal(resolved.available, true, 'managed media resolution retains its existing size-only availability policy');
+  await assert.rejects(importMedia({ root, projectId: 'project-test-123', assetId: 'asset-integrity-duplicate', sourcePath: source, mode: 'managed' }), /collision/);
 });
 
 test('relative references reject traversal and paths accept spaces and Unicode names', async (t) => {
@@ -161,6 +235,54 @@ test('a fresh process can restore a saved project manifest from disk', async (t)
   assert.equal(restored[0].sequences[0].tracks[0].clips.length, 0);
 });
 
+test('a recreated library process restores managed video, audio, and image clips after source removal', async (t) => {
+  const root = await tempRoot(t);
+  const sourceDirectory = path.join(root, 'imported sources');
+  await fs.mkdir(sourceDirectory);
+  const fixtures = [
+    { id: 'asset-video', name: 'camera.mp4', kind: 'video', bytes: Buffer.from('managed-video-fixture'), streams: { video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 90, width: 1920, height: 1080 } } },
+    { id: 'asset-audio', name: 'voice.wav', kind: 'audio', bytes: Buffer.from('managed-audio-fixture'), streams: { audio: { timeBase: { numerator: 1, denominator: 48000 }, durationTicks: 96000, sampleRate: 48000, channels: 2 } } },
+    { id: 'asset-image', name: 'title.png', kind: 'image', bytes: Buffer.from('managed-image-fixture'), streams: {}, imageDimensions: { width: 320, height: 180 } },
+  ];
+  const importedAssets = [];
+  const expectedFingerprints = {};
+  for (const fixture of fixtures) {
+    const sourcePath = path.join(sourceDirectory, fixture.name);
+    await fs.writeFile(sourcePath, fixture.bytes);
+    const imported = await importMedia({ root, projectId: 'project-test-123', assetId: fixture.id, sourcePath, mode: 'managed' });
+    expectedFingerprints[fixture.id] = imported.fingerprint;
+    importedAssets.push({
+      id: fixture.id, name: fixture.name, kind: fixture.kind, streams: fixture.streams, imageDimensions: fixture.imageDimensions,
+      sourcePath: imported.sourcePath, pathKind: imported.pathKind, fileSizeBytes: imported.fileSizeBytes, fingerprint: imported.fingerprint,
+    });
+  }
+  const saved = document();
+  saved.assets = importedAssets;
+  const videoTrack = saved.sequences[0].tracks[0];
+  const audioTrack = { id: 'track-a', name: 'Audio 1', kind: 'audio', muted: false, locked: false, clips: [] };
+  saved.sequences[0].tracks.push(audioTrack);
+  videoTrack.clips.push(
+    { id: 'clip-video', sourceId: 'asset-video', trackId: videoTrack.id, start: 0, trimIn: 0, trimOut: 3 },
+    { id: 'clip-image', sourceId: 'asset-image', trackId: videoTrack.id, start: 3, trimIn: 0, trimOut: 2 },
+  );
+  audioTrack.clips.push({ id: 'clip-audio', sourceId: 'asset-audio', trackId: audioTrack.id, start: 0, trimIn: 0, trimOut: 2 });
+  saved.sequences[0].durationFrames = 150;
+  await saveLibraryProject({ root, contents: json(saved) });
+  await Promise.all(fixtures.map((fixture) => fs.unlink(path.join(sourceDirectory, fixture.name))));
+
+  const { spawnSync } = require('node:child_process');
+  const storageModule = path.resolve(__dirname, 'persistentStorage.cjs');
+  const script = `const fs=require('node:fs/promises');const s=require(${JSON.stringify(storageModule)});(async()=>{const l=await s.listLibraryProjects(process.env.CLIPWRIGHT_TEST_ROOT);const p=l.projects.find(x=>x.documentId==='project-test-123');if(!p)throw Error('saved project was not restored');const d=JSON.parse(p.contents);const media=[];for(const a of d.assets){const r=await s.resolveAssetPath({root:process.env.CLIPWRIGHT_TEST_ROOT,projectId:d.id,asset:a});if(!r.available)throw Error(a.id+': '+r.reason);media.push({id:a.id,sha256:await s.hashFile(r.filePath),sizeBytes:r.sizeBytes});}console.log(JSON.stringify({document:d,media}));})().catch(e=>{console.error(e);process.exit(2)});`;
+  const child = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env, CLIPWRIGHT_TEST_ROOT: root } });
+  assert.equal(child.status, 0, child.stderr);
+  const restored = JSON.parse(child.stdout);
+  assert.deepEqual(restored.media.map((media) => [media.id, media.sha256]), Object.entries(expectedFingerprints));
+  const restoredVideoTrack = restored.document.sequences[0].tracks.find((track) => track.kind === 'video');
+  const restoredAudioTrack = restored.document.sequences[0].tracks.find((track) => track.kind === 'audio');
+  assert.deepEqual(restoredVideoTrack.clips.map((clip) => [clip.sourceId, clip.start, clip.trimOut]), [['asset-video', 0, 3], ['asset-image', 3, 2]]);
+  assert.deepEqual(restoredAudioTrack.clips.map((clip) => [clip.sourceId, clip.start, clip.trimOut]), [['asset-audio', 0, 2]]);
+});
+
 test('failed or malformed saves leave the last valid project and recovery copy intact', async (t) => {
   const root = await tempRoot(t);
   const valid = document();
@@ -174,6 +296,41 @@ test('failed or malformed saves leave the last valid project and recovery copy i
   const recoveryRoot = path.join(root, 'Diagnostics', 'Project recovery');
   const recoveryFiles = await fs.readdir(recoveryRoot, { recursive: true });
   assert.ok(recoveryFiles.some((file) => String(file).endsWith('.cwproject')));
+});
+
+test('backup refuses a manifest fingerprint traversal and leaves no file outside its temporary backup', async (t) => {
+  const root = await tempRoot(t);
+  const workspace = await tempRoot(t);
+  await ensureStorageLayout(root);
+  const projectId = 'project-traversal-1';
+  const source = path.join(workspace, 'payload.bin');
+  await fs.writeFile(source, 'backup-traversal-fixture');
+  const managed = await importMedia({ root, projectId, assetId: 'asset-safe', sourcePath: source, mode: 'managed' });
+  const doc = document(projectId);
+  doc.assets.push({ id: 'asset-safe', name: 'payload.bin', ...managed, fingerprint: '../../../PWNED-', kind: 'video', streams: { video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 30, width: 320, height: 180 } } });
+  const projectFolder = projectDirectory(root, projectId);
+  await fs.mkdir(projectFolder, { recursive: true });
+  await fs.writeFile(path.join(projectFolder, MANIFEST_NAME), json(doc));
+
+  const destinationDirectory = path.join(workspace, 'backups');
+  const escapedPath = path.join(workspace, 'PWNED--payload.bin');
+  await assert.rejects(createProjectBackup({ root, projectId, destinationDirectory }));
+  await assert.rejects(fs.access(escapedPath), { code: 'ENOENT' });
+});
+
+test('restore refuses a backup manifest with a malicious fingerprint before copying it', async (t) => {
+  const workspace = await tempRoot(t);
+  const backupDirectory = path.join(workspace, 'malicious-backup');
+  const mediaDirectory = path.join(backupDirectory, 'Media');
+  await fs.mkdir(mediaDirectory, { recursive: true });
+  const doc = document('project-malicious-backup');
+  doc.assets.push({ id: 'asset-safe', name: 'payload.bin', sourcePath: 'Media/payload.bin', pathKind: 'project-relative', fingerprint: '../../../PWNED-', kind: 'video', streams: { video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 30, width: 320, height: 180 } } });
+  await fs.writeFile(path.join(backupDirectory, MANIFEST_NAME), json(doc));
+  await fs.writeFile(path.join(mediaDirectory, 'payload.bin'), 'fixture');
+  const destinationRoot = path.join(workspace, 'restore-target');
+
+  await assert.rejects(restoreProjectBackup({ backupDirectory, destinationRoot }), /fingerprint.*SHA-256/i);
+  await assert.rejects(fs.access(projectDirectory(destinationRoot, doc.id)), { code: 'ENOENT' });
 });
 
 test('backup collects linked files only by choice and restores project state and managed media elsewhere', async (t) => {

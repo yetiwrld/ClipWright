@@ -8,7 +8,12 @@ if (process.isMainFrame) {
     exportFiles: Object.freeze({
       getDefaultFolder: () => ipcRenderer.invoke('export-files:get-default-folder'),
       chooseFolder: () => ipcRenderer.invoke('export-files:choose-folder'),
-      save: (payload) => ipcRenderer.invoke('export-files:save', payload),
+      begin: (payload) => ipcRenderer.invoke('export-files:begin', payload),
+      write: (payload) => ipcRenderer.invoke('export-files:write', payload),
+      prepare: (id) => ipcRenderer.invoke('export-files:prepare', id),
+      read: (payload) => ipcRenderer.invoke('export-files:read', payload),
+      commit: (id) => ipcRenderer.invoke('export-files:commit', id),
+      abort: (id) => ipcRenderer.invoke('export-files:abort', id),
       openFolder: (handle) => ipcRenderer.invoke('export-files:open-folder', handle),
     }),
     projectFiles: Object.freeze({

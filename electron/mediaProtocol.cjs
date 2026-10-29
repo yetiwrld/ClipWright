@@ -28,6 +28,17 @@ function clearMediaUrls(webContentsId, handles = new Map()) {
   return removed;
 }
 
+async function resolveMediaAssets({ assets, resolveAsset, registerUrl }) {
+  const results = [];
+  for (const asset of assets) {
+    const resolved = await resolveAsset(asset);
+    results.push(resolved.available
+      ? { assetId: asset.id, available: true, mediaUrl: registerUrl(resolved.filePath), sizeBytes: resolved.sizeBytes }
+      : { assetId: asset.id, available: false, reason: resolved.reason });
+  }
+  return results;
+}
+
 function parseRange(value, size) {
   if (typeof value !== 'string') return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
@@ -44,9 +55,10 @@ function parseRange(value, size) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-function mediaProtocolHandler(handles = new Map()) {
+function mediaProtocolHandler(handles = new Map(), { trustedOrigin = 'app://clipwright' } = {}) {
   return async function handleMediaRequest(request) {
     if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+    if (typeof request.initiatorOrigin !== 'string' || request.initiatorOrigin !== trustedOrigin) return new Response('Not found', { status: 404 });
     let token;
     try {
       const url = new URL(request.url);
@@ -54,13 +66,13 @@ function mediaProtocolHandler(handles = new Map()) {
       token = url.pathname.slice(1);
     } catch { return new Response('Not found', { status: 404 }); }
     const handle = handles.get(token);
-    if (!handle || (Number.isSafeInteger(request.webContentsId) && request.webContentsId !== handle.webContentsId)) return new Response('Not found', { status: 404 });
+    if (!handle) return new Response('Not found', { status: 404 });
     try {
       const stat = await fs.stat(handle.filePath);
       if (!stat.isFile()) return new Response('Not found', { status: 404 });
       const headers = {
         'Accept-Ranges': 'bytes',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': trustedOrigin,
         'Cache-Control': 'private, max-age=60',
         'Content-Type': MEDIA_MIME_TYPES.get(path.extname(handle.filePath).toLowerCase()) || 'application/octet-stream',
         'X-Content-Type-Options': 'nosniff',
@@ -87,4 +99,4 @@ function mediaProtocolHandler(handles = new Map()) {
   };
 }
 
-module.exports = { MEDIA_HOST, MEDIA_SCHEME, clearMediaUrls, mediaProtocolHandler, parseRange, registerMediaUrl };
+module.exports = { MEDIA_HOST, MEDIA_SCHEME, clearMediaUrls, mediaProtocolHandler, parseRange, registerMediaUrl, resolveMediaAssets };

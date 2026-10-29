@@ -1,3 +1,4 @@
+import { DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS, MAX_STILL_IMAGE_CLIP_DURATION_SECONDS } from './projectDocument';
 import type { ProjectDocument, Sequence, TimelineClip, Track } from './projectDocument';
 import { frameCountForEndTime } from './frameTime';
 
@@ -47,7 +48,8 @@ function withSequence(document: ProjectDocument, sequence: Sequence, modifiedAt?
 
 function getSourceDuration(document: ProjectDocument, sourceId: string, kind: Track['kind']) {
   const asset = document.assets.find((item) => item.id === sourceId);
-  if (!asset || asset.kind !== kind) throw new Error('The selected source does not match the destination track type.');
+  if (!asset || (asset.kind !== kind && !(asset.kind === 'image' && kind === 'video'))) throw new Error('The selected source does not match the destination track type.');
+  if (asset.kind === 'image' && kind === 'video') return MAX_STILL_IMAGE_CLIP_DURATION_SECONDS;
   const stream = asset.streams[kind];
   if (!stream) throw new Error('The selected source has no usable media stream.');
   return stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator;
@@ -89,7 +91,9 @@ export function addTimelineClip(
   const track = sequence.tracks.find((item) => item.id === trackId);
   if (!track || track.locked) throw new Error('Choose an unlocked destination track.');
   const assetDuration = getSourceDuration(document, sourceId, track.kind);
-  const trimOut = Math.floor(assetDuration * frameRateOf(sequence) + 1e-7) / frameRateOf(sequence);
+  const source = document.assets.find((item) => item.id === sourceId)!;
+  const durationLimit = source.kind === 'image' ? DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS : assetDuration;
+  const trimOut = Math.floor(Math.min(assetDuration, durationLimit) * frameRateOf(sequence) + 1e-7) / frameRateOf(sequence);
   if (trimOut <= 0) throw new Error('The source is shorter than one sequence frame.');
   const clip: TimelineClip = {
     id: clipId,

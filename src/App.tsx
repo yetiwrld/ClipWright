@@ -9,8 +9,10 @@ import {
   X, type LucideIcon,
 } from 'lucide-react';
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
+import { aspectRatioOf } from './lib/aspectRatio';
+import ProjectCanvasSettings from './components/ProjectCanvasSettings';
 import type { AspectRatio, Project } from './lib/projects';
-import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
+import { createProjectDocument, DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS, MAX_STILL_IMAGE_CLIP_DURATION_SECONDS, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, TimelineClip, Track } from './lib/projectDocument';
 import { probeBrowserAudio, probeBrowserVideo } from './lib/browserMedia';
 import { exportResolutionLabel, getExportBitrates, getExportDimensions } from './lib/exportResolution';
@@ -23,7 +25,7 @@ import { applyAppearance } from './lib/appearance';
 import { selectActiveVideoClip } from './lib/timelineVideoFrames';
 import { exportTimelineProject, type TimelineExportResult } from './lib/timelineExport';
 import { checkMp4EncodingSupport } from './lib/deterministicWebmExport';
-import type { EncoderConfigDiagnostic, FramePipelineCounts } from './lib/deterministicWebmExport';
+import type { EncoderConfigDiagnostic, ExportOutputStream, FramePipelineCounts } from './lib/deterministicWebmExport';
 import {
   addTimelineClip, clipDuration, clipEnd, duplicateTimelineClips, moveTimelineClips, pasteTimelineClips,
   quantizeTimelineTime, removeTimelineClips, resizeTimelineClip, sequenceDurationSeconds, splitTimelineClip,
@@ -60,12 +62,6 @@ function readableDate(date: string) {
 
 function formatFrameRate(value: number) {
   return `${Number.isInteger(value) ? value : Number(value.toFixed(3))} fps`;
-}
-
-function aspectRatioOf(width: number, height: number) {
-  const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
-  const divisor = gcd(width, height);
-  return `${width / divisor}:${height / divisor}`;
 }
 
 type SessionMediaSource = { url: string; name: string; blob?: Blob };
@@ -205,6 +201,10 @@ export default function App() {
   const [persistentStorageIssue, setPersistentStorageIssue] = useState<string | null>(null);
   const [mediaImportMode, setMediaImportMode] = useState<'managed' | 'linked'>(() => window.clipwright?.library ? 'managed' : 'linked');
   const persistentSaveQueuesRef = useRef(new Map<string, Promise<unknown>>());
+  const persistentAutosaveRevisionsRef = useRef(new Map<string, ProjectDocument>());
+  const persistentAutosaveTimersRef = useRef(new Map<string, number>());
+  const linkedAutosaveRevisionsRef = useRef(new Map<string, { document: ProjectDocument; handle: string }>());
+  const linkedAutosaveTimersRef = useRef(new Map<string, number>());
   const restoredMediaProjectIdsRef = useRef(new Set<string>());
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -289,6 +289,19 @@ export default function App() {
   // Persist application-owned project metadata; media files are not copied or uploaded.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, storageWarning]);
+
+  useEffect(() => () => {
+    for (const [id, timer] of persistentAutosaveTimersRef.current) {
+      window.clearTimeout(timer);
+      persistentAutosaveRevisionsRef.current.delete(id);
+    }
+    persistentAutosaveTimersRef.current.clear();
+    for (const [id, timer] of linkedAutosaveTimersRef.current) {
+      window.clearTimeout(timer);
+      linkedAutosaveRevisionsRef.current.delete(id);
+    }
+    linkedAutosaveTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     if (documentStorageWarning) return; // Keep unreadable project documents intact until recovery is confirmed.
@@ -391,26 +404,49 @@ export default function App() {
 
   useEffect(() => {
     const library = window.clipwright?.library;
-    if (!library || !desktopLibraryReady || isStorageRestoring || persistentStorageIssue) return;
-    const timers: number[] = [];
+    if (!library || !desktopLibraryReady || isStorageRestoring || persistentStorageIssue) {
+      for (const [id, timer] of persistentAutosaveTimersRef.current) {
+        window.clearTimeout(timer);
+        persistentAutosaveTimersRef.current.delete(id);
+        persistentAutosaveRevisionsRef.current.delete(id);
+      }
+      return;
+    }
+    const currentIds = new Set(documents.map((document) => document.id));
+    for (const id of persistentAutosaveRevisionsRef.current.keys()) {
+      if (!currentIds.has(id)) {
+        const timer = persistentAutosaveTimersRef.current.get(id);
+        if (timer !== undefined) window.clearTimeout(timer);
+        persistentAutosaveTimersRef.current.delete(id);
+        persistentAutosaveRevisionsRef.current.delete(id);
+      }
+    }
     for (const projectDocument of documents) {
+      if (persistentAutosaveRevisionsRef.current.get(projectDocument.id) === projectDocument) continue;
+      let contents: string;
+      try { contents = serializeProjectDocument(projectDocument); }
+      catch { setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'error' })); continue; }
+      // Record this immutable document revision as soon as it is queued so other state changes do not requeue it.
+      const previousTimer = persistentAutosaveTimersRef.current.get(projectDocument.id);
+      if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+      persistentAutosaveRevisionsRef.current.set(projectDocument.id, projectDocument);
       const timer = window.setTimeout(() => {
-        let contents: string;
-        try { contents = serializeProjectDocument(projectDocument); }
-        catch { setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'error' })); return; }
+        persistentAutosaveTimersRef.current.delete(projectDocument.id);
         setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'saving' }));
         const previous = persistentSaveQueuesRef.current.get(projectDocument.id) ?? Promise.resolve();
         const operation = previous.catch(() => undefined).then(() => library.saveProject({ contents }));
         persistentSaveQueuesRef.current.set(projectDocument.id, operation);
         void operation.then(() => {
-          if (persistentSaveQueuesRef.current.get(projectDocument.id) === operation) setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'saved' }));
+          if (persistentSaveQueuesRef.current.get(projectDocument.id) === operation && persistentAutosaveRevisionsRef.current.get(projectDocument.id) === projectDocument) {
+            setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'saved' }));
+          }
         }).catch(() => {
+          if (persistentAutosaveRevisionsRef.current.get(projectDocument.id) === projectDocument) persistentAutosaveRevisionsRef.current.delete(projectDocument.id);
           if (persistentSaveQueuesRef.current.get(projectDocument.id) === operation) setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'error' }));
         });
       }, Math.max(300, preferences.storage.autosaveIntervalSeconds * 1000));
-      timers.push(timer);
+      persistentAutosaveTimersRef.current.set(projectDocument.id, timer);
     }
-    return () => timers.forEach(window.clearTimeout);
   }, [documents, desktopLibraryReady, isStorageRestoring, persistentStorageIssue, preferences.storage.autosaveIntervalSeconds]);
 
   useEffect(() => {
@@ -445,32 +481,53 @@ export default function App() {
 
   useEffect(() => {
     const desktopFiles = window.clipwright?.projectFiles;
-    if (!desktopFiles) return;
-    const timers: number[] = [];
-    for (const document of documents) {
-      const linkedFile = managedProjectFiles[document.id];
-      if (!linkedFile) continue;
+    if (!desktopFiles) {
+      for (const [id, timer] of linkedAutosaveTimersRef.current) {
+        window.clearTimeout(timer);
+        linkedAutosaveTimersRef.current.delete(id);
+        linkedAutosaveRevisionsRef.current.delete(id);
+      }
+      return;
+    }
+    const linkedDocuments = documents.filter((document) => managedProjectFiles[document.id]);
+    const currentIds = new Set(linkedDocuments.map((document) => document.id));
+    for (const id of linkedAutosaveRevisionsRef.current.keys()) {
+      if (!currentIds.has(id)) {
+        const timer = linkedAutosaveTimersRef.current.get(id);
+        if (timer !== undefined) window.clearTimeout(timer);
+        linkedAutosaveTimersRef.current.delete(id);
+        linkedAutosaveRevisionsRef.current.delete(id);
+      }
+    }
+    for (const document of linkedDocuments) {
+      const linkedFile = managedProjectFiles[document.id]!;
+      const queuedRevision = linkedAutosaveRevisionsRef.current.get(document.id);
+      if (queuedRevision?.document === document && queuedRevision.handle === linkedFile.handle) continue;
+      let contents: string;
+      try { contents = serializeProjectDocument(document); }
+      catch { setDiskSaveStates((current) => ({ ...current, [document.id]: 'error' })); continue; }
+      const previousTimer = linkedAutosaveTimersRef.current.get(document.id);
+      if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+      linkedAutosaveRevisionsRef.current.set(document.id, { document, handle: linkedFile.handle });
       const timer = window.setTimeout(() => {
-        let contents: string;
-        try { contents = serializeProjectDocument(document); }
-        catch { setDiskSaveStates((current) => ({ ...current, [document.id]: 'error' })); return; }
+        linkedAutosaveTimersRef.current.delete(document.id);
         setDiskSaveStates((current) => ({ ...current, [document.id]: 'saving' }));
         const previous = saveQueuesRef.current.get(document.id) ?? Promise.resolve();
         const operation = previous.catch(() => undefined).then(() => desktopFiles.save({ handle: linkedFile.handle, contents }));
         saveQueuesRef.current.set(document.id, operation);
         void operation.then((result) => {
           if (saveQueuesRef.current.get(document.id) !== operation) return;
-          setDiskSaveStates((current) => ({ ...current, [document.id]: 'saved' }));
+          if (linkedAutosaveRevisionsRef.current.get(document.id)?.document === document && linkedAutosaveRevisionsRef.current.get(document.id)?.handle === linkedFile.handle) setDiskSaveStates((current) => ({ ...current, [document.id]: 'saved' }));
           setManagedProjectFiles((current) => current[document.id]?.handle === linkedFile.handle
             ? { ...current, [document.id]: { ...current[document.id], fileName: result.fileName } }
             : current);
         }).catch(() => {
+          if (linkedAutosaveRevisionsRef.current.get(document.id)?.document === document && linkedAutosaveRevisionsRef.current.get(document.id)?.handle === linkedFile.handle) linkedAutosaveRevisionsRef.current.delete(document.id);
           if (saveQueuesRef.current.get(document.id) === operation) setDiskSaveStates((current) => ({ ...current, [document.id]: 'error' }));
         });
       }, preferences.storage.autosaveIntervalSeconds * 1000);
-      timers.push(timer);
+      linkedAutosaveTimersRef.current.set(document.id, timer);
     }
-    return () => timers.forEach(window.clearTimeout);
   }, [documents, managedProjectFiles, preferences.storage.autosaveIntervalSeconds]);
 
   useEffect(() => {
@@ -976,10 +1033,12 @@ export default function App() {
     setIsReadingMedia(true);
     try {
       objectUrl = URL.createObjectURL(file);
-      const bitmap = await createImageBitmap(file);
+      let bitmap: ImageBitmap;
+      try { bitmap = await createImageBitmap(file); }
+      catch { throw new Error('This browser cannot decode the selected image format or file. Choose a supported local image such as PNG, JPEG, or WebP.'); }
       const imageDimensions = { width: bitmap.width, height: bitmap.height };
       bitmap.close();
-      if (imageDimensions.width > 16384 || imageDimensions.height > 16384) throw new Error('Image dimensions exceed the 16384 pixel project safety limit.');
+      if (imageDimensions.width < 16 || imageDimensions.height < 16 || imageDimensions.width > 16384 || imageDimensions.height > 16384) throw new Error('Image width and height must each be between 16 and 16384 pixels.');
       const assetId = targetAsset?.id ?? crypto.randomUUID();
       const persisted = window.clipwright?.library
         ? await window.clipwright.library.importFile(file, { projectId, assetId, mode: mediaImportMode })
@@ -1854,6 +1913,7 @@ function EditorFoundation({
   const [startFrameDraft, setStartFrameDraft] = useState('0');
   const [sourceInDraft, setSourceInDraft] = useState('0');
   const [sourceOutDraft, setSourceOutDraft] = useState('0');
+  const [stillDurationDraft, setStillDurationDraft] = useState(String(DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS));
   const [audioControlsDraft, setAudioControlsDraft] = useState<{ trackId: string; gain: number; pan: number } | null>(null);
   const audioControlsDraftRef = useRef<{ trackId: string; gain: number; pan: number } | null>(null);
   const [audioWaveforms, setAudioWaveforms] = useState<Record<string, { sourceUrl: string; peaks: number[] }>>({});
@@ -1972,12 +2032,19 @@ function EditorFoundation({
   const selectedClip = selectedClips[0] ?? null;
   const selectedClipTrack = selectedClip ? tracks.find((track) => track.id === selectedClip.trackId) ?? null : null;
   const selectedClipAsset = selectedClip ? assets.find((asset) => asset.id === selectedClip.sourceId) ?? null : null;
+  useEffect(() => {
+    if (selectedClip && selectedClipAsset?.kind === 'image') setStillDurationDraft(String(clipDuration(selectedClip)));
+  }, [selectedClip?.id, selectedClip?.trimIn, selectedClip?.trimOut, selectedClipAsset?.kind]);
   const selectedAudioSource = selectedClipAsset?.kind === 'audio' && projectDocument ? sessionSources[mediaKey(projectDocument.id, selectedClipAsset.id)] : undefined;
   const selectedAudioWaveform = selectedClipAsset?.kind === 'audio' && selectedAudioSource && audioWaveforms[selectedClipAsset.id]?.sourceUrl === selectedAudioSource.url ? audioWaveforms[selectedClipAsset.id] : null;
   const activeTimelineClip = videoClips
     .filter((clip) => !hiddenTrackIds[clip.trackId] && timelineTime >= clip.start - 1e-7 && timelineTime < clipEnd(clip) - 1e-7)
     .sort((a, b) => tracks.findIndex((track) => track.id === b.trackId) - tracks.findIndex((track) => track.id === a.trackId))[0] ?? null;
   const activeTimelineAsset = activeTimelineClip ? assets.find((asset) => asset.id === activeTimelineClip.sourceId) ?? null : null;
+  const activeTimelineImageAsset = activeTimelineAsset?.kind === 'image' ? activeTimelineAsset : null;
+  const activeTimelineImageUrl = activeTimelineImageAsset && projectDocument
+    ? sessionSources[mediaKey(projectDocument.id, activeTimelineImageAsset.id)]?.url ?? null
+    : null;
   const missingMediaIds = [...new Set(allClips.filter((clip) => projectDocument && !sessionSources[mediaKey(projectDocument.id, clip.sourceId)]).map((clip) => clip.sourceId))];
   const missingMediaAssets = missingMediaIds.map((id) => assets.find((asset) => asset.id === id)).filter((asset): asset is MediaAsset => Boolean(asset));
   const activeTimelineTrackMuted = Boolean(activeTimelineClip && (tracks.find((track) => track.id === activeTimelineClip.trackId)?.muted || (soloTrackIds.length > 0 && !soloTrackIds.includes(activeTimelineClip.trackId))));
@@ -2176,6 +2243,7 @@ function EditorFoundation({
 
   function sourceDuration(sourceId: string, kind: Track['kind']) {
     const asset = assets.find((item) => item.id === sourceId);
+    if (asset?.kind === 'image' && kind === 'video') return Math.floor(MAX_STILL_IMAGE_CLIP_DURATION_SECONDS * frameRateValue) / frameRateValue;
     const stream = asset?.streams[kind];
     if (!stream) return 0;
     const duration = stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator;
@@ -2300,9 +2368,18 @@ function EditorFoundation({
       const upcoming = nextActiveVideoChange(time, null);
       if (projectDocument && upcoming?.clip && upcoming.at - time <= 1) {
         const nextClip = upcoming.clip;
+        const nextAsset = assets.find((asset) => asset.id === nextClip.sourceId);
         const url = sessionSources[mediaKey(projectDocument.id, nextClip.sourceId)]?.url;
-        if (url) ensureDeckSource(1 - activeDeckRef.current, nextClip.sourceId, url, nextClip.trimIn + upcoming.at - nextClip.start, false, false);
+        if (url && nextAsset?.kind === 'video') ensureDeckSource(1 - activeDeckRef.current, nextClip.sourceId, url, nextClip.trimIn + upcoming.at - nextClip.start, false, false);
       }
+      return;
+    }
+    const clipAsset = assets.find((asset) => asset.id === clip.sourceId);
+    if (clipAsset?.kind === 'image') {
+      activeClipRef.current = clip.id;
+      setTimelineVideoVisible(false);
+      videoRefs.forEach((ref) => ref.current?.pause());
+      playRequestRef.current = [false, false];
       return;
     }
     const url = sessionSources[mediaKey(projectDocument.id, clip.sourceId)]?.url;
@@ -2495,11 +2572,13 @@ function EditorFoundation({
 
     let exportStage = 'validating project snapshot';
     let result: TimelineExportResult | null = null;
+    let exportStreamId: string | null = null;
     let videoEncoderConfig: EncoderConfigDiagnostic | null = null;
     let audioEncoderConfig: EncoderConfigDiagnostic | null = null;
     let latestExportCounts: (FramePipelineCounts & { encoded: number }) | null = null;
     const expectedDuration = activeSequence.durationFrames * activeSequence.frameRate.denominator / activeSequence.frameRate.numerator;
     const expectedFrames = activeSequence.durationFrames;
+    const exportFiles = window.clipwright?.exportFiles;
     const downloadDiagnostic = (error: unknown) => {
       const diagnostic = {
         schemaVersion: 1,
@@ -2544,6 +2623,8 @@ function EditorFoundation({
     };
 
     try {
+      const extension = exportContainer === 'mp4' ? 'mp4' : 'webm';
+      const outputName = (exportFilename.trim() || defaultExportFilename).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').replace(/[. ]+$/g, '').slice(0, 150) || 'ClipWright-export';
       const sourceBlobs = new Map<string, Blob>();
       const exportSourceIds = new Set(activeSequence.tracks.flatMap((track) => track.clips.map((clip) => clip.sourceId)));
       for (const asset of activeProjectDocument.assets) {
@@ -2557,6 +2638,37 @@ function EditorFoundation({
           sourceBlobs.set(asset.id, await response.blob());
         }
       }
+      let streamedOutput: ExportOutputStream | undefined;
+      if (exportFiles) {
+        if (!targetExportFolder) throw new Error('Choose an export folder before saving the encoded file.');
+        const expectedSizeBytes = Math.max(1, exportEstimatedBytes ?? Math.ceil(expectedDuration * 5_000_000 / 8 * 1.1));
+        const stream = await exportFiles.begin({ handle: targetExportFolder.handle, fileName: outputName, extension, expectedSizeBytes });
+        exportStreamId = stream.id;
+        streamedOutput = {
+          writable: new WritableStream({
+            write: async (chunk) => {
+              for (let offset = 0; offset < chunk.data.byteLength; offset += 8 * 1024 * 1024) {
+                if (!exportStreamId) throw new Error('The export file stream is no longer active.');
+                const bytes = chunk.data.subarray(offset, Math.min(chunk.data.byteLength, offset + 8 * 1024 * 1024));
+                await exportFiles.write({ id: exportStreamId, position: chunk.position + offset, bytes });
+              }
+            },
+            abort: async () => {
+              if (!exportStreamId) return;
+              await exportFiles.abort(exportStreamId);
+              exportStreamId = null;
+            },
+          }),
+          prepare: async () => {
+            if (!exportStreamId) throw new Error('The export file stream is no longer active.');
+            return (await exportFiles.prepare(exportStreamId)).sizeBytes;
+          },
+          read: async (start, end) => {
+            if (!exportStreamId) throw new Error('The export file stream is no longer active.');
+            return exportFiles.read({ id: exportStreamId, start, end });
+          },
+        };
+      }
       result = await exportTimelineProject({
         projectSnapshot: activeProjectDocument,
         sourceBlobs,
@@ -2567,6 +2679,7 @@ function EditorFoundation({
         hiddenTrackIds: activeHiddenTracks,
         soloTrackIds: activeSoloTracks,
         signal: controller.signal,
+        outputStream: streamedOutput,
         onStage: (stage) => { exportStage = stage; },
         onVideoEncoderConfig: (config) => { videoEncoderConfig = config; },
         onAudioEncoderConfig: (config) => { audioEncoderConfig = config; },
@@ -2579,17 +2692,19 @@ function EditorFoundation({
       });
       if (controller.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
 
-      const extension = exportContainer === 'mp4' ? 'mp4' : 'webm';
-      const outputName = (exportFilename.trim() || defaultExportFilename).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').replace(/[. ]+$/g, '').slice(0, 150) || 'ClipWright-export';
+      let finalFilename = `${outputName}.${extension}`;
       setExportSaveError(null);
       setExportSavedFile(null);
       setIsSavingExport(true);
-      if (window.clipwright?.exportFiles) {
-        if (!targetExportFolder) throw new Error('Choose an export folder before saving the encoded file.');
-        const saved = await window.clipwright.exportFiles.save({ handle: targetExportFolder.handle, fileName: outputName, extension, bytes: new Uint8Array(result.buffer) });
+      if (exportFiles) {
+        if (!exportStreamId) throw new Error('The validated export has no active file stream to commit.');
+        const saved = await exportFiles.commit(exportStreamId);
+        exportStreamId = null;
+        finalFilename = saved.fileName;
         setExportSavedFile({ handle: saved.fileHandle, fileName: saved.fileName, folderName: saved.folderName });
         onNotify(`Saved ${saved.fileName} to ${saved.folderName}.`, 'success');
       } else {
+        if (!result.buffer) throw new Error('The browser export did not produce an in-memory download buffer.');
         const blob = new Blob([result.buffer], { type: result.measurements.mimeType || (exportContainer === 'mp4' ? 'video/mp4' : 'video/webm') });
         const objectUrl = URL.createObjectURL(blob);
         const link = window.document.createElement('a');
@@ -2613,9 +2728,14 @@ function EditorFoundation({
       const videoConfig = result.encoderConfiguration.video;
       const audioConfig = result.encoderConfiguration.audio;
       const encoderSummary = `WebCodecs ${videoConfig?.codec ?? 'unknown'}${audioConfig ? `/${audioConfig.codec}` : ''}; hardware acceleration preference ${videoConfig?.hardwareAcceleration ?? 'default'} (actual hardware/software backend is not exposed by WebCodecs)`;
-      onNotify(`Exported ${outputName}.${extension}: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, output packets ${result.measurements.outputVideoPackets} (expected ${expectedFrames}); ${result.measurements.decodedSampleFrames} decoded validation samples passed; video ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.videoDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.videoToleranceSeconds.toFixed(6)}s) at ${result.measurements.outputVideoPacketRate.toFixed(6)} packets/s (sequence ${configuredFrameRate.toFixed(6)} fps); ${audioMeasurement}; container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.containerDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.containerToleranceSeconds.toFixed(6)}s); ${encoderSummary}.`, 'success');
+      onNotify(`Exported ${finalFilename}: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, output packets ${result.measurements.outputVideoPackets} (expected ${expectedFrames}); ${result.measurements.decodedSampleFrames} decoded validation samples passed; video ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.videoDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.videoToleranceSeconds.toFixed(6)}s) at ${result.measurements.outputVideoPacketRate.toFixed(6)} packets/s (sequence ${configuredFrameRate.toFixed(6)} fps); ${audioMeasurement}; container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.containerDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.containerToleranceSeconds.toFixed(6)}s); ${encoderSummary}.`, 'success');
       setExportProgress(100);
     } catch (error) {
+      if (exportStreamId && exportFiles) {
+        const abandonedStreamId = exportStreamId;
+        exportStreamId = null;
+        await exportFiles.abort(abandonedStreamId).catch((abortError) => console.error('ClipWright partial export cleanup failed:', abortError));
+      }
       const isAbort = error instanceof DOMException && error.name === 'AbortError';
       if (isAbort || controller.signal.aborted) onNotify('Export cancelled; no file was downloaded.', 'warning');
       else if (result) {
@@ -2884,16 +3004,17 @@ function EditorFoundation({
     if (!event.dataTransfer.types.includes('application/x-clipwright-source')) return;
     event.preventDefault();
     const sourceId = event.dataTransfer.getData('application/x-clipwright-source') || mediaDragSourceRef.current || ''; const asset = assets.find((item) => item.id === sourceId); const pos = getTimeAndTrack(event.clientX, event.clientY);
-    if (!asset || !pos || asset.kind !== pos.track.kind || pos.track.locked || !sequence) { setDropPreview(null); return; }
-    const duration = Math.max(1 / frameRateValue, sourceDuration(sourceId, pos.track.kind));
+    if (!asset || !pos || (asset.kind !== pos.track.kind && !(asset.kind === 'image' && pos.track.kind === 'video')) || pos.track.locked || !sequence) { setDropPreview(null); return; }
+    const duration = asset.kind === 'image' ? DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS : Math.max(1 / frameRateValue, sourceDuration(sourceId, pos.track.kind));
     const snap = snapClipStart(pos.time, duration);
     setDropPreview({ trackId: pos.track.id, start: snap.start, duration, guide: snap.guide });
   }
   function handleMediaDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     const sourceId = event.dataTransfer.getData('application/x-clipwright-source') || mediaDragSourceRef.current || ''; const pos = getTimeAndTrack(event.clientX, event.clientY); setDropPreview(null); mediaDragSourceRef.current = null;
-    if (!sourceId || !pos || pos.track.locked || !sequence || assets.find((item) => item.id === sourceId)?.kind !== pos.track.kind) return;
-    const length = sourceDuration(sourceId, pos.track.kind);
+    const asset = assets.find((item) => item.id === sourceId);
+    if (!sourceId || !asset || !pos || pos.track.locked || !sequence || (asset.kind !== pos.track.kind && !(asset.kind === 'image' && pos.track.kind === 'video'))) return;
+    const length = asset.kind === 'image' ? DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS : sourceDuration(sourceId, pos.track.kind);
     const start = snapClipStart(pos.time, length).start;
     const id = crypto.randomUUID();
     if (persistTimelineEdit((doc) => addTimelineClip(doc, sequence.id, sourceId, pos.track.id, start, id), 'Added clip to the timeline.')) { setSelectedClipIds([id]); seekTimelineTime(start); }
@@ -2901,7 +3022,8 @@ function EditorFoundation({
   function addSelectedSourceAtPlayhead() {
     const asset = activeMediaAsset;
     if (!asset || !sequence) return;
-    const track = tracks.find((item) => item.kind === asset.kind && !item.locked); if (!track) return;
+    const trackKind = asset.kind === 'image' ? 'video' : asset.kind;
+    const track = tracks.find((item) => item.kind === trackKind && !item.locked); if (!track) return;
     const id = crypto.randomUUID();
     if (persistTimelineEdit((doc) => addTimelineClip(doc, sequence.id, asset.id, track.id, timelineTimeRef.current, id), 'Added source at the playhead.')) setSelectedClipIds([id]);
   }
@@ -3224,7 +3346,7 @@ function EditorFoundation({
               {assets.map((asset) => {
                 const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
                 const available = Boolean(sessionSources[key]);
-                const supported = Boolean(asset.streams[asset.kind === 'audio' ? 'audio' : 'video']);
+                const supported = asset.kind === 'image' || Boolean(asset.streams[asset.kind === 'audio' ? 'audio' : 'video']);
                 const storageLabel = asset.pathKind === 'project-relative' ? 'Managed copy' : asset.pathKind === 'absolute' ? 'Linked original' : 'Session only';
                 return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
                   <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => onSelectMedia(key)} disabled={!projectDocument} title={asset.name} draggable={supported} onDragStart={(event) => {
@@ -3256,13 +3378,14 @@ function EditorFoundation({
           <div className="preview-stage">{focusMode && <button className="preview-focus-exit" type="button" aria-label="Exit focus mode" title="Exit focus mode (Esc)" onClick={onToggleFocusMode}><Minimize2 size={15} /><span>Exit focus mode</span></button>}<div className="preview-frame" data-tour="preview" style={{ aspectRatio: `${sequence?.width ?? 16} / ${sequence?.height ?? 9}`, width: 'auto', height: '100%', backgroundColor: sequence?.canvasBackground ?? '#000000' }}>
             <video ref={videoARef} className={`preview-video${activeDeck === 0 && timelineVideoVisible && deckReady[0] ? ' is-active' : ''}`} src={deckUrls[0] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[0])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 0} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} onLoadedMetadata={() => handlePreviewMetadata(0)} onLoadedData={() => handlePreviewReady(0)} onCanPlay={() => handlePreviewReady(0)} onPlay={() => { playRequestRef.current[0] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
             <video ref={videoBRef} className={`preview-video${activeDeck === 1 && timelineVideoVisible && deckReady[1] ? ' is-active' : ''}`} src={deckUrls[1] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[1])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 1} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} onLoadedMetadata={() => handlePreviewMetadata(1)} onLoadedData={() => handlePreviewReady(1)} onCanPlay={() => handlePreviewReady(1)} onPlay={() => { playRequestRef.current[1] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
+            {activeTimelineImageUrl && activeTimelineImageAsset && <img className="preview-image" src={activeTimelineImageUrl} alt={`Timeline image: ${activeTimelineImageAsset.name}`} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} />}
             {audioClips.map((clip) => {
               const asset = assets.find((item) => item.id === clip.sourceId);
               const source = projectDocument ? sessionSources[mediaKey(projectDocument.id, clip.sourceId)] : undefined;
               const nearClip = timelineTime + 1 >= clip.start && timelineTime <= clipEnd(clip);
               return <audio key={clip.id} ref={audioElementRefFor(clip.id)} className="timeline-audio-preview" src={source?.url} preload={nearClip ? 'auto' : 'metadata'} aria-hidden="true" aria-label={`Timeline audio: ${asset?.name ?? 'Audio clip'}`} onLoadedMetadata={() => handleAudioReady(clip.id)} onCanPlay={() => handleAudioReady(clip.id)} onPlay={() => audioPlayRequestRef.current.delete(clip.id)} onError={() => { setPlaybackError(true); onPlaybackError(); }} />;
             })}
-            {!timelineVideoVisible || !activeTimelineClip || !activeTimelineAsset ? <div className="preview-empty-state"><Film size={35} strokeWidth={1.15} /><span>{activeTimelineClip && activeTimelineAsset && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineClip.sourceId)] ? `Relink “${activeTimelineAsset.name}” to preview this clip` : activeTimelineAudioClip && activeTimelineAudioAsset && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAudioClip.sourceId)] ? `Relink “${activeTimelineAudioAsset.name}” to play this audio clip` : activeTimelineAudioClip ? 'Audio clip under the playhead · no video image' : sequenceLength && timelineTime < sequenceLength ? 'No clip under the playhead' : 'Add media to the timeline to preview'}</span>{activeTimelineAsset?.kind === 'video' && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAsset.id)] && <button className="button button-secondary button-small preview-relink" type="button" onClick={() => onRelinkVideo(activeTimelineAsset.id)} disabled={isReadingMedia}><Upload size={13} />Relink video</button>}{activeTimelineAudioAsset && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAudioAsset.id)] && <button className="button button-secondary button-small preview-relink" type="button" onClick={() => onRelinkAudio(activeTimelineAudioAsset.id)} disabled={isReadingMedia}><Upload size={13} />Relink audio</button>}</div> : null}
+            {((!timelineVideoVisible || !activeTimelineClip || !activeTimelineAsset) && !activeTimelineImageUrl) ? <div className="preview-empty-state"><Film size={35} strokeWidth={1.15} /><span>{activeTimelineClip && activeTimelineAsset && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineClip.sourceId)] ? `Relink “${activeTimelineAsset.name}” to preview this clip` : activeTimelineAudioClip && activeTimelineAudioAsset && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAudioClip.sourceId)] ? `Relink “${activeTimelineAudioAsset.name}” to play this audio clip` : activeTimelineAudioClip ? 'Audio clip under the playhead · no video image' : sequenceLength && timelineTime < sequenceLength ? 'No clip under the playhead' : 'Add media to the timeline to preview'}</span>{activeTimelineAsset?.kind === 'video' && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAsset.id)] && <button className="button button-secondary button-small preview-relink" type="button" onClick={() => onRelinkVideo(activeTimelineAsset.id)} disabled={isReadingMedia}><Upload size={13} />Relink video</button>}{activeTimelineAsset?.kind === 'image' && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAsset.id)] && <button className="button button-secondary button-small preview-relink" type="button" onClick={() => onRelinkImage(activeTimelineAsset.id)} disabled={isReadingMedia}><Upload size={13} />Relink image</button>}{activeTimelineAudioAsset && !sessionSources[mediaKey(projectDocument?.id ?? '', activeTimelineAudioAsset.id)] && <button className="button button-secondary button-small preview-relink" type="button" onClick={() => onRelinkAudio(activeTimelineAudioAsset.id)} disabled={isReadingMedia}><Upload size={13} />Relink audio</button>}</div> : null}
             {playbackError && <span className="preview-error" role="status">Browser playback failed for this source.</span>}
             <div className="preview-corner tl"/><div className="preview-corner tr"/><div className="preview-corner bl"/><div className="preview-corner br"/>
             <small>{sequence?.name ?? 'Sequence 01'} · {ratio} · {frameRate}</small>
@@ -3287,20 +3410,25 @@ function EditorFoundation({
               <span className="panel-kicker">TIMELINE CLIP</span><strong className="selected-clip-name">{selectedClipAsset.name}</strong>
               <div className="property-line"><span>Start</span><strong>{formatPlaybackTime(selectedClip.start)}</strong></div>
               <div className="property-line"><span>Duration</span><strong>{formatPlaybackTime(clipDuration(selectedClip))}</strong></div>
-              <div className="property-line"><span>Source range</span><strong>{selectedClip.trimIn.toFixed(3)}–{selectedClip.trimOut.toFixed(3)} s</strong></div>
+              {selectedClipAsset.kind === 'image'
+                ? <div className="property-line"><span>Still duration</span><strong>{formatPlaybackTime(clipDuration(selectedClip))}</strong></div>
+                : <div className="property-line"><span>Source range</span><strong>{selectedClip.trimIn.toFixed(3)}–{selectedClip.trimOut.toFixed(3)} s</strong></div>}
               <form className="frame-position-form" onSubmit={(event) => {
                 event.preventDefault(); const start = Math.max(0, Number(startFrameDraft) / frameRateValue);
                 persistTimelineEdit((doc) => moveTimelineClips(doc, sequence!.id, [selectedClip.id], selectedClip.trackId, start, rippleMode), 'Moved clip to the requested frame.');
               }}>
                 <label htmlFor="clip-start-frame">Timeline start frame</label><div><input id="clip-start-frame" type="number" min="0" step="1" value={startFrameDraft} onChange={(event) => setStartFrameDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /><button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Set</button></div>
               </form>
-              <form className="source-trim-form" onSubmit={(event) => {
+              {selectedClipAsset.kind === 'image' ? <div className="source-trim-form">
+                <div><label htmlFor="image-clip-duration">Clip duration (seconds)</label><input id="image-clip-duration" type="number" min={1 / frameRateValue} max={MAX_STILL_IMAGE_CLIP_DURATION_SECONDS} step={1 / frameRateValue} value={stillDurationDraft} onChange={(event) => setStillDurationDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
+                <button className="button button-secondary button-small" type="button" onClick={() => persistTimelineEdit((doc) => resizeTimelineClip(doc, sequence!.id, selectedClip.id, selectedClip.start, 0, Number(stillDurationDraft), rippleMode), 'Updated still-image duration.')} disabled={!!selectedClipTrack?.locked}>Set duration</button>
+              </div> : <form className="source-trim-form" onSubmit={(event) => {
                 event.preventDefault(); persistTimelineEdit((doc) => resizeTimelineClip(doc, sequence!.id, selectedClip.id, selectedClip.start, Number(sourceInDraft), Number(sourceOutDraft), rippleMode), 'Updated clip source trim.');
               }}>
                 <div><label htmlFor="clip-source-in">Source in (seconds)</label><input id="clip-source-in" type="number" min="0" max={sourceDuration(selectedClip.sourceId, selectedClipTrack?.kind ?? 'video')} step="any" value={sourceInDraft} onChange={(event) => setSourceInDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
                 <div><label htmlFor="clip-source-out">Source out (seconds)</label><input id="clip-source-out" type="number" min="0" max={sourceDuration(selectedClip.sourceId, selectedClipTrack?.kind ?? 'video')} step="any" value={sourceOutDraft} onChange={(event) => setSourceOutDraft(event.target.value)} disabled={!!selectedClipTrack?.locked} /></div>
                 <button className="button button-secondary button-small" type="submit" disabled={!!selectedClipTrack?.locked}>Apply trim</button>
-              </form>
+              </form>}
               <small>All edit times snap to the sequence frame rate. Original media is never changed.</small>
               {selectedClipTrack?.kind === 'audio' && <div className="audio-track-controls" role="group" aria-label={`${selectedClipTrack.name} audio controls`}>
                 <span className="panel-kicker">AUDIO TRACK MIX</span>
@@ -3471,42 +3599,6 @@ function RecoveryDialog({ projectName, points, restoring, onRestore, onClose }: 
   </div>;
 }
 
-function ProjectCanvasSettings({ sequence, onApply, idPrefix = 'property-canvas' }: { sequence: Sequence; onApply: (width: number, height: number, fit: NonNullable<Sequence['canvasFit']>, background: string) => void; idPrefix?: string }) {
-  const fit = sequence.canvasFit ?? 'fit';
-  const background = sequence.canvasBackground ?? '#000000';
-  const ratio = aspectRatioOf(sequence.width, sequence.height);
-  const presets: Record<string, { width: number; height: number }> = {
-    '16:9': { width: 1920, height: 1080 }, '9:16': { width: 1080, height: 1920 }, '1:1': { width: 1080, height: 1080 },
-    '4:3': { width: 1440, height: 1080 }, '3:4': { width: 1080, height: 1440 }, '4:5': { width: 1080, height: 1350 },
-    '5:4': { width: 1350, height: 1080 }, '21:9': { width: 2520, height: 1080 },
-  };
-  return <section className="property-section project-canvas-settings" aria-labelledby="project-canvas-title">
-    <span className="panel-kicker">PROJECT CANVAS</span>
-    <strong id="project-canvas-title">{sequence.width} × {sequence.height} px · {ratio}</strong>
-    <label className="canvas-setting-label" htmlFor={`${idPrefix}-aspect-preset`}>Aspect ratio preset</label>
-    <select id={`${idPrefix}-aspect-preset`} className="select-input" value={presets[ratio] ? ratio : 'custom'} onChange={(event) => {
-      const preset = presets[event.target.value];
-      if (preset) onApply(preset.width, preset.height, fit, background);
-    }}>
-      <option value="16:9">Landscape · 16:9</option><option value="9:16">Portrait · 9:16</option><option value="1:1">Square · 1:1</option>
-      <option value="4:3">Classic · 4:3</option><option value="3:4">Portrait · 3:4</option><option value="4:5">Social · 4:5</option>
-      <option value="5:4">Classic · 5:4</option><option value="21:9">Ultrawide · 21:9</option><option value="custom">Custom dimensions</option>
-    </select>
-    <form key={`${sequence.id}:${sequence.width}x${sequence.height}:${fit}:${background}`} className="canvas-settings-form" onSubmit={(event) => {
-      event.preventDefault();
-      const data = new FormData(event.currentTarget);
-      onApply(Number(data.get('width')), Number(data.get('height')), String(data.get('fit')) as NonNullable<Sequence['canvasFit']>, String(data.get('background')));
-    }}>
-      <div className="canvas-dimension-row"><div><label htmlFor={`${idPrefix}-width`}>Width</label><input id={`${idPrefix}-width`} name="width" type="number" min="16" max="16384" step="1" defaultValue={sequence.width} required /></div><span aria-hidden="true">×</span><div><label htmlFor={`${idPrefix}-height`}>Height</label><input id={`${idPrefix}-height`} name="height" type="number" min="16" max="16384" step="1" defaultValue={sequence.height} required /></div></div>
-      <label className="canvas-setting-label" htmlFor={`${idPrefix}-fit`}>Source composition</label>
-      <select id={`${idPrefix}-fit`} name="fit" className="select-input" defaultValue={fit}><option value="fit">Fit · preserve full image</option><option value="fill">Fill · crop edges</option><option value="stretch">Stretch · distort to canvas</option></select>
-      <label className="canvas-setting-label" htmlFor={`${idPrefix}-background`}>Canvas background</label><input id={`${idPrefix}-background`} name="background" type="color" defaultValue={background} />
-      <button className="button button-secondary button-small" type="submit">Apply canvas settings</button>
-    </form>
-    <small>These saved dimensions and composition are shared by the preview and both export formats. H.264/AVC requires even pixel dimensions; no automatic resizing is applied.</small>
-  </section>;
-}
-
 function formatFileSize(bytes: number | null) {
   if (bytes === null || !Number.isFinite(bytes)) return 'Not available';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -3658,7 +3750,7 @@ function SettingsDialog({
               <form className="settings-project-name" onSubmit={(event) => { event.preventDefault(); if (projectName.trim()) onRenameProject(projectName.trim()); }}><label htmlFor="settings-project-name">Project name</label><div><input id="settings-project-name" className="text-input" value={projectName} maxLength={100} onChange={(event) => setProjectName(event.target.value)} /><button className="button button-secondary button-small" type="submit" disabled={!projectName.trim() || projectName.trim() === project.name}>Rename</button></div></form>
               <div className="settings-frame-rate"><label htmlFor="settings-project-fps">Project frame rate</label><select id="settings-project-fps" className="select-input" value={sequence.frameRate.numerator / sequence.frameRate.denominator} onChange={(event) => onApplyFrameRate(Number(event.target.value))}>{frameRates.map((rate) => <option key={rate.value} value={rate.value}>{rate.label}</option>)}</select><small>Changing frame rate preserves approximate sequence duration and frame-aligns clip positions.</small></div>
               <ProjectCanvasSettings sequence={sequence} onApply={onApplyCanvas} idPrefix="settings-canvas" />
-              <div className="settings-info-row"><strong>Default still-image duration</strong><span>Coming soon · still-image timeline import is not available yet.</span></div>
+              <div className="settings-info-row"><strong>Default still-image duration</strong><span>New image clips start at 5 seconds; adjust each clip in Properties.</span></div>
             </> : <div className="settings-empty"><strong>No open project</strong><span>Open a project to edit its name, canvas, and frame rate.</span></div>}
           </section>}
           {tab === 'editor' && <section id="settings-panel-editor" role="tabpanel" aria-labelledby="settings-tab-editor" className="settings-section">
@@ -3760,7 +3852,7 @@ function HelpDialog({ onClose, canTour, onStartTour }: { onClose: () => void; ca
       <div className="eyebrow">QUICK REFERENCE</div><h2 id="help-title">Keyboard shortcuts</h2>
       <p className="dialog-copy">Shortcuts are available while editing. Focused controls keep their normal keyboard behavior.</p>
       <section className="help-getting-started" aria-labelledby="help-started-title">
-        <div><h3 id="help-started-title">Getting started</h3><p>Create or open a project, import video or audio, drag a clip to its matching track, then preview and export. Image files can be stored in the media bin; image timeline clips are not available yet.</p></div>
+        <div><h3 id="help-started-title">Getting started</h3><p>Create or open a project, import video, audio, or image files, drag media to a matching timeline track, then preview and export. Still images go on video tracks and can have their duration adjusted in Properties.</p></div>
         <button type="button" className="button button-secondary button-small" onClick={onStartTour} disabled={!canTour} title={!canTour ? 'Open a project in the Editor to start the tour.' : 'Tour the media bin, preview, timeline, and properties.'}>Start editor tour</button>
       </section>
       <div className="help-shortcut-grid">

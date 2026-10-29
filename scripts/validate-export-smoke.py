@@ -234,6 +234,76 @@ def validate_dimension_output(path, specification, fixture, source_frame_times, 
     return report
 
 
+def validate_still_image_output(path, container, ffmpeg, ffprobe):
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise AssertionError(f"Required still-image production output is missing or empty: {path.name}")
+    metadata = run_json(ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)])
+    streams = metadata.get("streams", [])
+    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    if video is None or audio is not None:
+        raise AssertionError(f"{path.name}: expected exactly one video stream and no audio stream")
+    if (int(video.get("width", 0)), int(video.get("height", 0))) != (320, 180):
+        raise AssertionError(f"{path.name}: output dimensions are not exactly 320x180")
+    formats = str(metadata.get("format", {}).get("format_name", "")).lower()
+    if container == "mp4":
+        if video.get("codec_name") != "h264" or "mp4" not in formats:
+            raise AssertionError(f"{path.name}: expected H.264 in MP4, got codec={video.get('codec_name')} format={formats}")
+    elif not str(video.get("codec_name", "")).lower().startswith("vp9") or "webm" not in formats:
+        raise AssertionError(f"{path.name}: expected VP9 in WebM, got codec={video.get('codec_name')} format={formats}")
+
+    timebase_value = video.get("time_base")
+    if not timebase_value or "/" not in timebase_value:
+        raise AssertionError(f"{path.name}: ffprobe did not report a video time base")
+    timebase_numerator, timebase_denominator = (float(value) for value in timebase_value.split("/", 1))
+    if timebase_numerator <= 0 or timebase_denominator <= 0:
+        raise AssertionError(f"{path.name}: invalid video time base {timebase_value}")
+    timebase_seconds = timebase_numerator / timebase_denominator
+    frame_tolerance = 1 / 30 / 2 + timebase_seconds / 2
+    expected_duration = 12 / 30
+    frame_records = run_json(ffprobe, ["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time,pkt_duration_time", "-of", "json", str(path)]).get("frames", [])
+    timestamps = [float(frame["best_effort_timestamp_time"]) for frame in frame_records if "best_effort_timestamp_time" in frame]
+    if len(frame_records) != 12 or len(timestamps) != 12:
+        raise AssertionError(f"{path.name}: ffprobe found {len(frame_records)} frames; expected exactly 12")
+    if any(right <= left for left, right in zip(timestamps, timestamps[1:])):
+        raise AssertionError(f"{path.name}: frame PTS are not strictly increasing")
+    timestamp_errors = [timestamp - index / 30 for index, timestamp in enumerate(timestamps)]
+    if any(abs(error) > frame_tolerance for error in timestamp_errors):
+        raise AssertionError(f"{path.name}: frame PTS do not match the 30 fps output timeline")
+    last_duration = frame_records[-1].get("pkt_duration_time")
+    if last_duration in (None, "N/A", "nan"):
+        last_duration = statistics.median(right - left for left, right in zip(timestamps, timestamps[1:]))
+    video_duration = timestamps[-1] + float(last_duration) - timestamps[0]
+    container_duration = float(metadata.get("format", {}).get("duration", "nan"))
+    if abs(video_duration - expected_duration) > frame_tolerance or abs(container_duration - expected_duration) > frame_tolerance:
+        raise AssertionError(f"{path.name}: output duration differs from {expected_duration:.9f}s (video={video_duration}, container={container_duration}, tolerance={frame_tolerance})")
+
+    decoded = subprocess.run([ffmpeg, "-v", "warning", "-xerror", "-i", str(path), "-map", "0:v:0", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], check=False, capture_output=True)
+    if decoded.returncode != 0:
+        raise RuntimeError(f"{path.name}: independent FFmpeg decode failed: {decoded.stderr.decode('utf-8', errors='replace')[-4000:]}")
+    bytes_per_frame = 320 * 180 * 3
+    decoded_count, remainder = divmod(len(decoded.stdout), bytes_per_frame)
+    if remainder or decoded_count != 12:
+        raise AssertionError(f"{path.name}: FFmpeg decoded {decoded_count} frames (remainder={remainder}); expected 12")
+    pixels = [sample_rgb(decoded.stdout[index * bytes_per_frame:(index + 1) * bytes_per_frame], 320, 160, 90) for index in range(12)]
+    bad_pixels = [(index, pixel) for index, pixel in enumerate(pixels) if not (pixel[0] > 130 and pixel[1] < 110 and pixel[2] > 130)]
+    if bad_pixels:
+        raise AssertionError(f"{path.name}: independent decoded center pixels do not contain the expected magenta still at every frame: {bad_pixels[:3]}")
+    return {
+        "file": path.name,
+        "container": container,
+        "codec": video.get("codec_name"),
+        "dimensions": {"width": 320, "height": 180},
+        "frames": decoded_count,
+        "timestampsSeconds": timestamps,
+        "videoDurationSeconds": video_duration,
+        "containerDurationSeconds": container_duration,
+        "durationToleranceSeconds": frame_tolerance,
+        "centerPixelsRgb": pixels,
+        "independentPixelChecksPassed": len(pixels) == 12,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", required=True)
@@ -486,6 +556,17 @@ def main():
         independent_outputs.append(validate_dimension_output(root / name, specification, fixture, source_frame_times, args.ffmpeg, args.ffprobe))
 
     report["mp4ProductionOutputs"] = independent_outputs
+    still_smoke = smoke.get("stillImageExport", {})
+    if not isinstance(still_smoke, dict):
+        raise AssertionError("Packaged still-image streamed-export smoke report is missing")
+    still_outputs = still_smoke.get("outputs", {})
+    if not isinstance(still_outputs, dict) or still_smoke.get("pass") is not True or any(not isinstance(still_outputs.get(container), dict) or still_outputs[container].get("passed") is not True for container in ("webm", "mp4")):
+        raise AssertionError("Packaged still-image streamed-export smoke did not pass independent decoded frame/pixel checks for both WebM and MP4")
+    independent_still_outputs = [
+        validate_still_image_output(root / f"timeline-still-image.{container}", container, args.ffmpeg, args.ffprobe)
+        for container in ("webm", "mp4")
+    ]
+    report["stillImageOutputs"] = independent_still_outputs
     report["productionMp4CancellationThenRetryPassed"] = True
     report["runtime"] = smoke.get("runtime", {})
     report["requiredMp4Coverage"] = {"videoOnly": True, "videoWithAacLc": True, "landscape": True, "portrait": True, "customDimensions": True, "independentDecode": True, "cancellationRetry": True, "unsupportedConfigurationRejected": True}

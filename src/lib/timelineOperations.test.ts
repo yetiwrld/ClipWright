@@ -29,6 +29,26 @@ describe('seconds-based timeline operations', () => {
     expect(serializeProjectDocument(second)).toContain('"trimOut": 10');
   });
 
+  it('places still images on video tracks with editable duration and schema-v2 persistence', () => {
+    const document = makeDocument();
+    document.assets.push({ id: 'asset-image', name: 'still.png', sourcePath: 'still.png', pathKind: 'browser-session', kind: 'image', streams: {}, imageDimensions: { width: 1600, height: 900 } });
+    const sequenceId = document.sequences[0].id;
+    const trackId = videoTrack(document).id;
+    const added = addTimelineClip(document, sequenceId, 'asset-image', trackId, 1, 'image-clip');
+    expect(videoTrack(added).clips[0]).toMatchObject({ id: 'image-clip', sourceId: 'asset-image', start: 1, trimIn: 0, trimOut: 5 });
+    expect(added.sequences[0].durationFrames).toBe(180);
+    expect(() => serializeProjectDocument(added)).not.toThrow();
+
+    const shortened = resizeTimelineClip(added, sequenceId, 'image-clip', 1, 0, 3);
+    const moved = moveTimelineClips(shortened, sequenceId, ['image-clip'], trackId, 4);
+    const duplicated = duplicateTimelineClips(moved, sequenceId, ['image-clip'], ['image-copy'], 8);
+    expect(videoTrack(duplicated).clips.map((clip) => [clip.id, clip.start, clipDuration(clip)])).toEqual([
+      ['image-clip', 4, 3], ['image-copy', 8, 3],
+    ]);
+    expect(() => serializeProjectDocument(duplicated)).not.toThrow();
+    expect(videoTrack(removeTimelineClips(duplicated, sequenceId, ['image-copy'])).clips).toHaveLength(1);
+  });
+
   it('rounds timeline times to rational sequence frames and duration to the last frame', () => {
     const document = makeDocument();
     document.sequences[0].frameRate = { numerator: 30_000, denominator: 1001 };

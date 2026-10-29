@@ -122,6 +122,18 @@ describe('versioned project documents', () => {
     expect(migrated.sequences[0].durationFrames).toBe(150);
   });
 
+  it('rejects unsafe asset identifiers and non-SHA-256 fingerprints', () => {
+    const document = createProjectDocument(createProject('Fingerprint validation', '16:9', 30));
+    const asset = { id: 'asset-1', name: 'source.mp4', sourcePath: 'Media/source.mp4', pathKind: 'project-relative' as const, kind: 'video' as const, streams: { video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 30, width: 320, height: 180 } } };
+    document.assets.push({ ...asset, id: '../escape' });
+    expect(validateProjectDocument(document)).toMatchObject({ valid: false, errors: expect.arrayContaining([expect.stringMatching(/assets\[0\]\.id.*safe stable identifier/)]) });
+
+    document.assets[0] = { ...asset, fingerprint: '../../../PWNED-' };
+    expect(validateProjectDocument(document)).toMatchObject({ valid: false, errors: expect.arrayContaining([expect.stringMatching(/assets\[0\]\.fingerprint.*SHA-256/)]) });
+    document.assets[0] = { ...asset, fingerprint: 'a'.repeat(64) };
+    expect(validateProjectDocument(document).valid).toBe(true);
+  });
+
   it('rejects unsupported versions, malformed JSON, non-frame times, dangling sources, and overlap', () => {
     const document = createProjectDocument(createProject('Validation', '16:9', 30));
     expect(() => parseProjectDocument('{broken')).toThrow('not valid JSON');

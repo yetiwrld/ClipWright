@@ -10,9 +10,17 @@ const {
   readRecoveryPoint,
   writeProjectFile,
 } = require('./projectFiles.cjs');
-const { writeExportFile } = require('./exportFiles.cjs');
+const {
+  abortExportFile,
+  beginExportFile,
+  commitExportFile,
+  prepareExportFile,
+  readExportChunk,
+  writeExportChunk,
+} = require('./exportFiles.cjs');
+const { safeProjectFilename } = require('./fileNames.cjs');
 const persistentStorage = require('./persistentStorage.cjs');
-const { MEDIA_HOST, MEDIA_SCHEME, clearMediaUrls, mediaProtocolHandler, registerMediaUrl } = require('./mediaProtocol.cjs');
+const { MEDIA_HOST, MEDIA_SCHEME, clearMediaUrls, mediaProtocolHandler, registerMediaUrl, resolveMediaAssets } = require('./mediaProtocol.cjs');
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'clipwright';
@@ -106,6 +114,7 @@ async function handleAppRequest(request) {
 const projectFileHandles = new Map();
 const exportFolderHandles = new Map();
 const exportFileHandles = new Map();
+const exportStreamHandles = new Map();
 const persistentProjectHashes = new Map();
 const mediaUrlHandles = new Map();
 
@@ -139,14 +148,6 @@ function recoveryRoot() {
   return path.join(app.getPath('userData'), 'project-recovery');
 }
 
-function safeProjectFilename(name) {
-  const safeName = String(name || 'ClipWright project')
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
-    .replace(/[. ]+$/g, '')
-    .trim() || 'ClipWright project';
-  return /\.cwproject$/i.test(safeName) ? safeName : `${safeName}.cwproject`;
-}
-
 function registerProjectHandle(event, filePath, projectId, contentHash) {
   const handle = crypto.randomUUID();
   projectFileHandles.set(handle, { filePath, projectId, contentHash, webContentsId: event.sender.id });
@@ -166,6 +167,25 @@ function getExportFolder(event, handle) {
   const folder = typeof handle === 'string' ? exportFolderHandles.get(handle) : null;
   if (!folder || folder.webContentsId !== event.sender.id) throw new Error('This export folder is no longer linked. Choose a folder again.');
   return folder;
+}
+
+function getExportStream(event, id) {
+  assertTrustedIpcSender(event);
+  const stream = typeof id === 'string' ? exportStreamHandles.get(id) : null;
+  if (!stream || stream.webContentsId !== event.sender.id) throw new Error('This export stream is no longer linked.');
+  return stream;
+}
+
+function registerExportFile(event, folderPath, saved) {
+  const fileHandleId = crypto.randomUUID();
+  exportFileHandles.set(fileHandleId, { filePath: saved.filePath, webContentsId: event.sender.id });
+  event.sender.once('destroyed', () => exportFileHandles.delete(fileHandleId));
+  return { fileName: saved.fileName, folderName: path.basename(folderPath) || folderPath, fileHandle: fileHandleId, sizeBytes: saved.sizeBytes };
+}
+
+async function abortExportStream(id, stream) {
+  exportStreamHandles.delete(id);
+  await abortExportFile(stream.transaction);
 }
 
 function getProjectHandle(event, handle) {
@@ -222,14 +242,11 @@ function registerIpcHandlers() {
     assertTrustedIpcSender(event);
     const manifest = await readProjectFile(path.join(persistentStorage.projectDirectory(storageRoot(), projectId), persistentStorage.MANIFEST_NAME));
     const document = parseProjectEnvelope(manifest.contents, { allowLegacy: true, expectedId: projectId });
-    const results = [];
-    for (const asset of document.assets ?? []) {
-      const resolved = await persistentStorage.resolveAssetPath({ root: storageRoot(), projectId, asset });
-      results.push(resolved.available
-        ? { assetId: asset.id, available: true, mediaUrl: registerMediaUrl(resolved.filePath, event.sender.id, mediaUrlHandles), sizeBytes: resolved.sizeBytes }
-        : { assetId: asset.id, available: false, reason: resolved.reason });
-    }
-    return results;
+    return resolveMediaAssets({
+      assets: document.assets ?? [],
+      resolveAsset: (asset) => persistentStorage.resolveAssetPath({ root: storageRoot(), projectId, asset }),
+      registerUrl: (filePath) => registerMediaUrl(filePath, event.sender.id, mediaUrlHandles),
+    });
   });
 
   ipcMain.handle('library:reveal-media', async (event, payload) => {
@@ -328,15 +345,45 @@ function registerIpcHandlers() {
     return { canceled: false, handle: registerExportFolder(event, folderPath), folderName: path.basename(folderPath) || folderPath };
   });
 
-  ipcMain.handle('export-files:save', async (event, payload) => {
-    const folder = getExportFolder(event, payload?.handle);
+  ipcMain.handle('export-files:begin', async (event, payload) => {
     if (!payload || typeof payload !== 'object') throw new Error('Export data is required.');
-    const saved = await writeExportFile({ folderPath: folder.folderPath, fileName: payload.fileName, extension: payload.extension, bytes: payload.bytes });
-    const { filePath, fileName, sizeBytes } = saved;
-    const fileHandleId = crypto.randomUUID();
-    exportFileHandles.set(fileHandleId, { filePath, webContentsId: event.sender.id });
-    event.sender.once('destroyed', () => exportFileHandles.delete(fileHandleId));
-    return { fileName, folderName: path.basename(folder.folderPath) || folder.folderPath, fileHandle: fileHandleId, sizeBytes };
+    const folder = getExportFolder(event, payload.handle);
+    const transaction = await beginExportFile({ folderPath: folder.folderPath, fileName: payload.fileName, extension: payload.extension, expectedSizeBytes: payload.expectedSizeBytes });
+    if (event.sender.isDestroyed()) { await abortExportFile(transaction); throw new Error('The editor window is no longer available.'); }
+    exportStreamHandles.set(transaction.id, { transaction, folderPath: folder.folderPath, webContentsId: event.sender.id });
+    event.sender.once('destroyed', () => { void abortExportStream(transaction.id, exportStreamHandles.get(transaction.id) ?? { transaction }).catch(() => undefined); });
+    return { id: transaction.id };
+  });
+
+  ipcMain.handle('export-files:write', async (event, payload) => {
+    if (!payload || typeof payload !== 'object') throw new Error('Export chunk data is required.');
+    const stream = getExportStream(event, payload.id);
+    await writeExportChunk(stream.transaction, payload.position, payload.bytes);
+    return { written: payload.bytes.byteLength };
+  });
+
+  ipcMain.handle('export-files:prepare', async (event, id) => {
+    const stream = getExportStream(event, id);
+    return { sizeBytes: await prepareExportFile(stream.transaction) };
+  });
+
+  ipcMain.handle('export-files:read', async (event, payload) => {
+    if (!payload || typeof payload !== 'object') throw new Error('Export validation range is required.');
+    const stream = getExportStream(event, payload.id);
+    return readExportChunk(stream.transaction, payload.start, payload.end);
+  });
+
+  ipcMain.handle('export-files:commit', async (event, id) => {
+    const stream = getExportStream(event, id);
+    const saved = await commitExportFile(stream.transaction);
+    exportStreamHandles.delete(id);
+    return registerExportFile(event, stream.folderPath, saved);
+  });
+
+  ipcMain.handle('export-files:abort', async (event, id) => {
+    const stream = getExportStream(event, id);
+    await abortExportStream(id, stream);
+    return { aborted: true };
   });
 
   ipcMain.handle('export-files:open-folder', async (event, handle) => {
@@ -580,6 +627,9 @@ function createWindow() {
     for (const [handle, file] of exportFileHandles) {
       if (file.webContentsId === window.webContents.id) exportFileHandles.delete(handle);
     }
+    for (const [id, stream] of exportStreamHandles) {
+      if (stream.webContentsId === window.webContents.id) void abortExportStream(id, stream).catch(() => undefined);
+    }
     clearMediaUrls(window.webContents.id, mediaUrlHandles);
   });
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -612,7 +662,7 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     if (!devServerUrl) await protocol.handle(APP_SCHEME, handleAppRequest);
-    await protocol.handle(MEDIA_SCHEME, mediaProtocolHandler(mediaUrlHandles));
+    await protocol.handle(MEDIA_SCHEME, mediaProtocolHandler(mediaUrlHandles, { trustedOrigin: devServerOrigin ?? `${APP_SCHEME}://${APP_HOST}` }));
     await persistentStorage.ensureStorageLayout(storageRoot());
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     registerIpcHandlers();

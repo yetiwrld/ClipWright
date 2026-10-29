@@ -58,6 +58,12 @@ The prior run [40879301564](https://github.com/yetiwrld/ClipWright/actions/runs/
 
 A synthetic pass will not validate imported user media, unsupported source codecs, long-run duration/memory behavior, all GPU/software encoder modes, or the historical export. Record OS/Electron/Chromium/encoder configuration and missing hardware coverage for each CI/device run; do not claim physical hardware acceleration from a WebCodecs preference field.
 
+## Desktop chunked-save implementation — 2026-10-29
+
+Desktop exports now use Mediabunny `StreamTarget` writes over acknowledged IPC chunks (each at most 8 MiB) into a per-export `.part` file. Once muxing completes, the main process syncs the temporary file and exposes bounded ranged reads; the renderer re-runs the same packet, timestamp, track, decoded-sample, frame-count, duration, and encoder-configuration checks through Mediabunny `CustomSource` before the main process atomically publishes the file without overwriting an existing name. Failed/cancelled runs abort and remove the partial file. The begin call checks estimated free space; streaming output has a 64 GiB ceiling. Desktop MP4 uses standard non-fast-start layout so muxing does not buffer all media for an in-memory metadata rewrite. The browser-download path remains buffered.
+
+Local regression tests cover streamed begin/write/prepare/ranged-read/commit/abort behavior, out-of-order writes, gap rejection, collision protection and chunk bounds. The packaged synthetic smoke harness now exercises the streamed target and asserts that the muxer result retains no full output buffer. `npm run build` type-checks and bundles this path, but this Linux turn has not run the packaged Windows smoke, the MP4/WebM independent validators, 30-minute exports, or target-device memory sampling. Existing validation tolerances and checks were not changed; successful end-to-end streaming export is not claimed until Windows CI passes.
+
 ## Target-device procedure and release gates
 
 1. Record the device model, Windows build, exact Electron/Chromium versions, display/GPU, power profile, and effective encoder configurations (mark hardware use unknown unless independently confirmed).

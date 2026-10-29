@@ -3,6 +3,8 @@ import { frameCountForEndTime } from './frameTime';
 
 export const PROJECT_SCHEMA_VERSION = 2;
 export const PROJECT_DOCUMENTS_KEY = 'clipwright.project-documents.v1';
+export const DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS = 5;
+export const MAX_STILL_IMAGE_CLIP_DURATION_SECONDS = 3600;
 
 export type Rational = { numerator: number; denominator: number };
 export type StreamInfo = {
@@ -83,6 +85,8 @@ export type DocumentStoreResult = { documents: ProjectDocument[]; issue: 'invali
 
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+const isStableId = (value: unknown): value is string => isString(value) && /^[A-Za-z0-9_-]{1,160}$/.test(value);
+const isSha256Fingerprint = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const isInteger = (value: unknown, min = 0): value is number => Number.isSafeInteger(value) && (value as number) >= min;
 const isRational = (value: unknown): value is Rational => isObject(value)
   && isInteger(value.numerator, 1) && isInteger(value.denominator, 1);
@@ -190,7 +194,7 @@ export function validateProjectDocument(value: unknown): ValidationResult {
   assets.forEach((asset, index) => {
     const path = `assets[${index}]`;
     if (!isObject(asset)) { errors.push(`${path} must be an object.`); return; }
-    if (!isString(asset.id)) errors.push(`${path}.id must be a non-empty string.`);
+    if (!isStableId(asset.id)) errors.push(`${path}.id must be a safe stable identifier.`);
     else {
       if (allIds.has(asset.id)) errors.push(`${path}.id duplicates another project entity.`);
       allIds.add(asset.id); assetIds.add(asset.id);
@@ -215,7 +219,7 @@ export function validateProjectDocument(value: unknown): ValidationResult {
     if (asset.kind === 'video' && !asset.streams.video) errors.push(`${path} video assets must include a video stream.`);
     if (asset.kind === 'audio' && !asset.streams.audio) errors.push(`${path} audio assets must include an audio stream.`);
     if (asset.fileSizeBytes !== undefined && !isInteger(asset.fileSizeBytes)) errors.push(`${path}.fileSizeBytes must be a non-negative integer.`);
-    if (asset.fingerprint !== undefined && !isString(asset.fingerprint)) errors.push(`${path}.fingerprint must be a non-empty string.`);
+    if (asset.fingerprint !== undefined && !isSha256Fingerprint(asset.fingerprint)) errors.push(`${path}.fingerprint must be a 64-character lowercase SHA-256 hex digest.`);
     if (asset.imageDimensions !== undefined && (!isObject(asset.imageDimensions) || !isInteger(asset.imageDimensions.width, 1) || asset.imageDimensions.width > 16384 || !isInteger(asset.imageDimensions.height, 1) || asset.imageDimensions.height > 16384)) errors.push(`${path}.imageDimensions must contain whole pixel dimensions from 1 to 16384.`);
     if (asset.imageDimensions !== undefined && asset.kind !== 'image') errors.push(`${path}.imageDimensions is only valid for image assets.`);
   });
@@ -282,14 +286,21 @@ export function validateProjectDocument(value: unknown): ValidationResult {
         if (isString(clip.sourceId)) {
           const asset = assets.find((entry) => isObject(entry) && entry.id === clip.sourceId);
           if (!asset || !isObject(asset)) return;
-          if (asset.kind !== track.kind) errors.push(`${clipPath} source media kind must match its track kind.`);
-          const streamKey = track.kind === 'video' ? 'video' : 'audio';
-          const stream = isObject(asset.streams) ? asset.streams[streamKey] : undefined;
-          if (!isObject(stream)) errors.push(`${clipPath} references an asset without the required ${streamKey} stream.`);
-          else if (typeof clip.trimOut === 'number' && Number.isFinite(clip.trimOut)
-            && isRational(stream.timeBase) && isInteger(stream.durationTicks, 1)
-            && clip.trimOut > stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator + 1e-7) {
-            errors.push(`${clipPath}.trimOut exceeds the source stream duration.`);
+          const stillImageOnVideoTrack = asset.kind === 'image' && track.kind === 'video';
+          if (asset.kind !== track.kind && !stillImageOnVideoTrack) errors.push(`${clipPath} source media kind must match its track kind.`);
+          if (stillImageOnVideoTrack) {
+            if (typeof clip.trimOut === 'number' && Number.isFinite(clip.trimOut) && clip.trimOut > MAX_STILL_IMAGE_CLIP_DURATION_SECONDS + 1e-7) {
+              errors.push(`${clipPath}.trimOut exceeds the still-image clip duration limit.`);
+            }
+          } else {
+            const streamKey = track.kind === 'video' ? 'video' : 'audio';
+            const stream = isObject(asset.streams) ? asset.streams[streamKey] : undefined;
+            if (!isObject(stream)) errors.push(`${clipPath} references an asset without the required ${streamKey} stream.`);
+            else if (typeof clip.trimOut === 'number' && Number.isFinite(clip.trimOut)
+              && isRational(stream.timeBase) && isInteger(stream.durationTicks, 1)
+              && clip.trimOut > stream.durationTicks * stream.timeBase.numerator / stream.timeBase.denominator + 1e-7) {
+              errors.push(`${clipPath}.trimOut exceeds the source stream duration.`);
+            }
           }
         }
       });

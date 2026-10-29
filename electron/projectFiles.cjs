@@ -5,6 +5,8 @@ const path = require('node:path');
 
 const PROJECT_FILE_MAX_BYTES = 25 * 1024 * 1024;
 const MAX_RECOVERY_POINTS = 10;
+const ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -41,6 +43,15 @@ function parseProjectEnvelope(contents, { allowLegacy = false, expectedId } = {}
     }
   } else if (document.schemaVersion === 1 && (!Array.isArray(document.assets) || !Array.isArray(document.sequences))) {
     throw new Error('The version-1 project document is missing its media or sequence collections.');
+  }
+  if (Array.isArray(document.assets)) {
+    document.assets.forEach((asset, index) => {
+      if (!isObject(asset)) throw new Error(`assets[${index}] must be an object.`);
+      if (typeof asset.id !== 'string' || !ID_PATTERN.test(asset.id)) throw new Error(`assets[${index}].id is invalid; expected a safe stable identifier.`);
+      if (asset.fingerprint !== undefined && (typeof asset.fingerprint !== 'string' || !SHA256_PATTERN.test(asset.fingerprint))) {
+        throw new Error(`assets[${index}].fingerprint is invalid; expected a 64-character lowercase SHA-256 hex digest.`);
+      }
+    });
   }
   return document;
 }

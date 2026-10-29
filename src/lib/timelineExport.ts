@@ -16,8 +16,9 @@ import {
   encodeDeterministicWebm,
   videoTimestampToleranceSeconds,
 } from './deterministicWebmExport';
-import type { DeterministicWebmResult, EncoderConfigDiagnostic, FramePipelineCounts } from './deterministicWebmExport';
+import type { DeterministicWebmResult, EncoderConfigDiagnostic, ExportOutputStream, FramePipelineCounts } from './deterministicWebmExport';
 import { drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
+import type { TimelineCanvas } from './timelineVideoFrames';
 
 export type TimelineExportStage = string;
 
@@ -33,6 +34,7 @@ export interface TimelineExportRequest {
   hiddenTrackIds?: Readonly<Record<string, boolean>>;
   soloTrackIds?: readonly string[];
   signal: AbortSignal;
+  outputStream?: ExportOutputStream;
   onProgress?: (counts: FramePipelineCounts & { encoded: number }) => void;
   onStage?: (stage: TimelineExportStage) => void;
   onVideoEncoderConfig?(config: EncoderConfigDiagnostic): void;
@@ -112,6 +114,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
 
   const audioReaders: AudioReader[] = [];
   const videoFrameReaders = new Map<string, Awaited<ReturnType<typeof openVideoFrameReader>>>();
+  const activeImageBitmapRef: { current: { assetId: string; bitmap: ImageBitmap } | null } = { current: null };
   // Resolve candidates directly from each clip's asset id so audio-only and embedded audio share one path.
   const availableAudioCandidates = clips
     .map((clip) => ({ clip, track: trackById.get(clip.trackId)!, asset: assetById.get(clip.sourceId), blob: request.sourceBlobs.get(clip.sourceId) }))
@@ -200,19 +203,32 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
     const drawFrame = async (_frameIndex: number, timestampSeconds: number) => {
       assertNotAborted(request.signal);
       const clip = selectActiveVideoClip(videoClips, tracks, timestampSeconds, hiddenTrackIds);
-      let sourceCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
+      let sourceCanvas: TimelineCanvas | null = null;
       if (clip) {
         const blob = request.sourceBlobs.get(clip.sourceId);
-        if (blob) {
+        const asset = assetById.get(clip.sourceId);
+        if (blob && asset?.kind === 'image') {
+          if (activeImageBitmapRef.current?.assetId !== clip.sourceId) {
+            activeImageBitmapRef.current?.bitmap.close();
+            request.onStage?.(`Opening still image ${asset.name}`);
+            activeImageBitmapRef.current = { assetId: clip.sourceId, bitmap: await createImageBitmap(blob) };
+          }
+          sourceCanvas = activeImageBitmapRef.current.bitmap;
+        } else if (blob && asset?.kind === 'video') {
+          activeImageBitmapRef.current?.bitmap.close();
+          activeImageBitmapRef.current = null;
           let reader = videoFrameReaders.get(clip.sourceId);
           if (!reader) {
-            request.onStage?.(`Opening video source ${assetById.get(clip.sourceId)?.name ?? clip.sourceId}`);
+            request.onStage?.(`Opening video source ${asset.name}`);
             reader = await openVideoFrameReader(blob);
             videoFrameReaders.set(clip.sourceId, reader);
           }
           const decoded = await reader.getCanvasAt(sourceTimeForTimelineClip(clip, timestampSeconds));
           sourceCanvas = decoded?.canvas ?? null;
         }
+      } else {
+        activeImageBitmapRef.current?.bitmap.close();
+        activeImageBitmapRef.current = null;
       }
       assertNotAborted(request.signal);
       drawLetterboxedVideoFrame(canvasContext, canvas.width, canvas.height, sourceCanvas, {
@@ -235,6 +251,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       audioSampleRate: sequence.audioSampleRate,
       includeAudio: audioReaders.length > 0,
       signal: request.signal,
+      outputStream: request.outputStream,
       drawFrame,
       renderAudioChunk: audioReaders.length ? renderAudioChunk : undefined,
       onProgress: request.onProgress,
@@ -328,5 +345,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       try { await reader.dispose(); } catch { /* Preserve the export result or primary diagnostic if a decoder fails during disposal. */ }
     }
     videoFrameReaders.clear();
+    activeImageBitmapRef.current?.bitmap.close();
+    activeImageBitmapRef.current = null;
   }
 }

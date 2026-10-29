@@ -86,6 +86,20 @@ test('skips duplicate checkpoints and retains only the newest recovery points', 
   assert.equal((await listRecoveryPoints(workspace)).length, MAX_RECOVERY_POINTS);
 });
 
+test('rejects unsafe asset ids and non-SHA-256 fingerprints in project envelopes', () => {
+  const unsafeId = JSON.parse(documentText('Unsafe asset id'));
+  unsafeId.assets = [{ id: '../escape' }];
+  assert.throws(() => parseProjectEnvelope(JSON.stringify(unsafeId), { allowLegacy: true }), /assets\[0\]\.id.*invalid/);
+
+  const unsafeFingerprint = JSON.parse(documentText('Unsafe fingerprint'));
+  unsafeFingerprint.assets = [{ id: 'asset-1', fingerprint: '../../../PWNED-' }];
+  assert.throws(() => parseProjectEnvelope(JSON.stringify(unsafeFingerprint), { allowLegacy: true }), /assets\[0\]\.fingerprint.*SHA-256/);
+
+  const validFingerprint = JSON.parse(documentText('Valid fingerprint'));
+  validFingerprint.assets = [{ id: 'asset-1', fingerprint: 'a'.repeat(64) }];
+  assert.equal(parseProjectEnvelope(JSON.stringify(validFingerprint), { allowLegacy: true }).assets[0].fingerprint, 'a'.repeat(64));
+});
+
 test('parses legacy JSON for importing but only permits schema-v2 writes', async (t) => {
   const workspace = await makeWorkspace(t);
   const legacy = JSON.stringify({ id: 'project-1', name: 'Older project' });

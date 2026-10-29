@@ -89,6 +89,17 @@ describe('timeline video frame selection and draw policy', () => {
     expect(drawImage).toHaveBeenCalledWith(source, 0, 25, 100, 50);
   });
 
+  it('composes still-image bitmaps through the same fit policy as video frames', () => {
+    const fillRect = vi.fn();
+    const drawImage = vi.fn();
+    const context = { fillStyle: '', fillRect, drawImage } as unknown as CanvasRenderingContext2D;
+    const image = { width: 300, height: 300, close: vi.fn() } as unknown as ImageBitmap;
+    drawLetterboxedVideoFrame(context, 160, 90, image, { fit: 'fit', background: '#101820' });
+    expect(context.fillStyle).toBe('#101820');
+    expect(fillRect).toHaveBeenCalledWith(0, 0, 160, 90);
+    expect(drawImage).toHaveBeenCalledWith(image, 35, 0, 90, 90);
+  });
+
   it('uses explicit fill cropping, stretch geometry, and project background colors', () => {
     const fillRect = vi.fn();
     const drawImage = vi.fn();
