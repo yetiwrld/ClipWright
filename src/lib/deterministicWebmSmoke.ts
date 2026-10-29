@@ -463,6 +463,8 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     }
     const report = {
       pass: videoPass && audioPass && unsupportedConfigurationRejected,
+      videoPass,
+      audioPass,
       stage,
       fixture: 'saved-project-timeline-audio-video-identity',
       projectId: result.projectId,

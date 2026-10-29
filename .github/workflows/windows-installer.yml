@@ -82,10 +82,27 @@ jobs:
                 audioOnsetMatches = $frame.actual.audioOnsetMatches
                 avSyncChecks = $frame.actual.avSyncChecks
               }
+              $stillImageSummary = [ordered]@{
+                pass = $failed.stillImageExport.pass
+                fixture = $failed.stillImageExport.fixture
+                outputs = [ordered]@{}
+              }
+              foreach ($format in @('webm', 'mp4')) {
+                $output = $failed.stillImageExport.outputs.$format
+                if ($output) {
+                  $stillImageSummary.outputs[$format] = [ordered]@{
+                    passed = $output.passed
+                    expected = $output.expected
+                    actual = $output.actual
+                  }
+                }
+              }
               $short = [ordered]@{
                 audioDurationSmokePass = $failed.audioDurationSmokePass
                 frameIdentityPass = $frame.pass
-                stillImageExport = $failed.stillImageExport
+                frameVideoPass = $frame.videoPass
+                frameAudioPass = $frame.audioPass
+                stillImageExport = $stillImageSummary
                 stage = $frame.stage
                 error = $frame.error
                 requiredMp4Coverage = $frame.requiredMp4Coverage
