@@ -651,7 +651,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       'source-B.webm': sourceBase64.B,
       'saved-project.json': stringToBase64(projectSnapshot),
       'fixture.json': stringToBase64(JSON.stringify(fixtureMetadata, null, 2)),
-      'timeline-export.webm': arrayBufferToBase64(requireExportBuffer(result)),
+      'timeline-export.webm': arrayBufferToBase64(outputBuffer),
     };
     return { report, artifacts };
   } catch (error) {
