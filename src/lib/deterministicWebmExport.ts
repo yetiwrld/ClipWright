@@ -24,6 +24,36 @@ export const OPUS_PACKET_DURATION_SECONDS = 0.020;
 /** Average RGB error threshold for three tiny decoded frame probes; the encoded file is lossy. */
 export const MAX_DECODED_PROBE_MEAN_ABSOLUTE_ERROR = 48;
 
+export type EncoderConfigDiagnostic = Record<string, string | number | boolean | null | Record<string, string | number | boolean | null>>;
+
+/** Copy only plain WebCodecs configuration fields for JSON diagnostics and safe Electron IPC cloning. */
+export function encoderConfigDiagnostic(config: VideoEncoderConfig | AudioEncoderConfig): EncoderConfigDiagnostic {
+  const input = config as unknown as Record<string, unknown>;
+  const diagnostic: EncoderConfigDiagnostic = {};
+  const scalarKeys = [
+    'codec', 'width', 'height', 'displayWidth', 'displayHeight', 'framerate', 'bitrate',
+    'hardwareAcceleration', 'latencyMode', 'alpha', 'scalabilityMode', 'bitrateMode',
+    'sampleRate', 'numberOfChannels', 'opusComplexity', 'opusPacketlossperc', 'opusUseinbandfec',
+  ];
+  for (const key of scalarKeys) {
+    const value = input[key];
+    if (typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) diagnostic[key] = value;
+  }
+  const colorSpace = input.colorSpace;
+  if (colorSpace && typeof colorSpace === 'object') {
+    const plainColorSpace: Record<string, string | number | boolean | null> = {};
+    for (const key of ['primaries', 'transfer', 'matrix', 'fullRange']) {
+      const value = (colorSpace as Record<string, unknown>)[key];
+      if (typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) plainColorSpace[key] = value;
+    }
+    if (Object.keys(plainColorSpace).length) diagnostic.colorSpace = plainColorSpace;
+  }
+  const description = input.description;
+  if (description instanceof ArrayBuffer) diagnostic.descriptionByteLength = description.byteLength;
+  else if (ArrayBuffer.isView(description)) diagnostic.descriptionByteLength = description.byteLength;
+  return diagnostic;
+}
+
 export function videoTimestampToleranceSeconds(framePeriodSeconds: number, timebaseSeconds = WEBM_TIMEBASE_SECONDS) {
   return framePeriodSeconds / 2 + timebaseSeconds / 2;
 }
@@ -232,14 +262,14 @@ export async function encodeDeterministicWebm(options: DeterministicWebmOptions)
   const expectedProbes: ExpectedVideoProbe[] = [];
   let validationStage = 'encoding and muxing WebM';
   let finalizedMeasurements: EncodedFileMeasurements | null = null;
-  let videoEncoderConfiguration: VideoEncoderConfig | null = null;
-  let audioEncoderConfiguration: AudioEncoderConfig | null = null;
+  let videoEncoderConfiguration: EncoderConfigDiagnostic | null = null;
+  let audioEncoderConfiguration: EncoderConfigDiagnostic | null = null;
   const videoSource = new CanvasSource(options.canvas, {
     codec: 'vp9',
     bitrate: options.videoBitrate,
     keyFrameInterval: 2,
     hardwareAcceleration: options.hardwareAcceleration,
-    onEncoderConfig: (config) => { videoEncoderConfiguration = config; options.onEncoderConfig?.(config); },
+    onEncoderConfig: (config) => { videoEncoderConfiguration = encoderConfigDiagnostic(config); options.onEncoderConfig?.(config); },
     onEncodedPacket: () => {
       encoded += 1;
       options.onProgress?.({ requested: counts.requested, rendered: counts.rendered, submitted: counts.submitted, encoded });
@@ -250,7 +280,7 @@ export async function encodeDeterministicWebm(options: DeterministicWebmOptions)
 
   let audioSource: AudioBufferSource | null = null;
   if (options.includeAudio) {
-    audioSource = new AudioBufferSource({ codec: 'opus', bitrate: options.audioBitrate, onEncoderConfig: (config) => { audioEncoderConfiguration = config; options.onAudioEncoderConfig?.(config); } });
+    audioSource = new AudioBufferSource({ codec: 'opus', bitrate: options.audioBitrate, onEncoderConfig: (config) => { audioEncoderConfiguration = encoderConfigDiagnostic(config); options.onAudioEncoderConfig?.(config); } });
     output.addAudioTrack(audioSource);
   }
 

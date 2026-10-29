@@ -19,7 +19,7 @@ import { prepareLocalMediaFile } from './lib/localMediaImport';
 import { calculateWaveformPeaks } from './lib/audioWaveform';
 import { selectActiveVideoClip } from './lib/timelineVideoFrames';
 import { exportTimelineProject, type TimelineExportResult } from './lib/timelineExport';
-import type { FramePipelineCounts } from './lib/deterministicWebmExport';
+import type { EncoderConfigDiagnostic, FramePipelineCounts } from './lib/deterministicWebmExport';
 import {
   addTimelineClip, clipDuration, clipEnd, duplicateTimelineClips, moveTimelineClips, pasteTimelineClips,
   quantizeTimelineTime, removeTimelineClips, resizeTimelineClip, sequenceDurationSeconds, splitTimelineClip,
@@ -1727,8 +1727,8 @@ function EditorFoundation({
 
     let exportStage = 'validating project snapshot';
     let result: TimelineExportResult | null = null;
-    let videoEncoderConfig: VideoEncoderConfig | null = null;
-    let audioEncoderConfig: AudioEncoderConfig | null = null;
+    let videoEncoderConfig: EncoderConfigDiagnostic | null = null;
+    let audioEncoderConfig: EncoderConfigDiagnostic | null = null;
     let latestExportCounts: (FramePipelineCounts & { encoded: number }) | null = null;
     const expectedDuration = activeSequence.durationFrames * activeSequence.frameRate.denominator / activeSequence.frameRate.numerator;
     const expectedFrames = activeSequence.durationFrames;

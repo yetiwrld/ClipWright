@@ -7,13 +7,14 @@ import type { ProjectDocument, Sequence, TimelineClip, Track } from './projectDo
 import { mapAudioPartToTimelineChunk } from './timelineAudioFrames';
 import {
   areExportFrameCountsExact,
+  encoderConfigDiagnostic,
   OPUS_PACKET_DURATION_SECONDS,
   audioDurationToleranceSeconds,
   createSequenceExportPlan,
   encodeDeterministicWebm,
   videoTimestampToleranceSeconds,
 } from './deterministicWebmExport';
-import type { DeterministicWebmResult, FramePipelineCounts } from './deterministicWebmExport';
+import type { DeterministicWebmResult, EncoderConfigDiagnostic, FramePipelineCounts } from './deterministicWebmExport';
 import { drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
 
 export type TimelineExportStage = string;
@@ -31,8 +32,8 @@ export interface TimelineExportRequest {
   signal: AbortSignal;
   onProgress?: (counts: FramePipelineCounts & { encoded: number }) => void;
   onStage?: (stage: TimelineExportStage) => void;
-  onVideoEncoderConfig?(config: VideoEncoderConfig): void;
-  onAudioEncoderConfig?(config: AudioEncoderConfig): void;
+  onVideoEncoderConfig?(config: EncoderConfigDiagnostic): void;
+  onAudioEncoderConfig?(config: EncoderConfigDiagnostic): void;
 }
 
 export interface TimelineExportResult extends DeterministicWebmResult {
@@ -40,7 +41,7 @@ export interface TimelineExportResult extends DeterministicWebmResult {
   sequenceId: string;
   expectedAudioTrack: boolean;
   outputDimensions: { width: number; height: number };
-  encoderConfiguration: { video: VideoEncoderConfig | null; audio: AudioEncoderConfig | null };
+  encoderConfiguration: { video: EncoderConfigDiagnostic | null; audio: EncoderConfigDiagnostic | null };
   durationValidation: {
     expectedSeconds: number;
     videoDeltaSeconds: number;
@@ -215,8 +216,8 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
     stage = 'encoding and muxing WebM';
     request.onStage?.(stage);
     const bitrates = getExportBitrates(outputDimensions.width, outputDimensions.height, sequence.frameRate.numerator / sequence.frameRate.denominator, request.quality ?? 'standard');
-    let videoEncoderConfig: VideoEncoderConfig | null = null;
-    let audioEncoderConfig: AudioEncoderConfig | null = null;
+    let videoEncoderConfig: EncoderConfigDiagnostic | null = null;
+    let audioEncoderConfig: EncoderConfigDiagnostic | null = null;
     const result = await encodeDeterministicWebm({
       canvas,
       plan,
@@ -228,8 +229,16 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       renderAudioChunk: audioReaders.length ? renderAudioChunk : undefined,
       onProgress: request.onProgress,
       onValidationStage: request.onStage,
-      onEncoderConfig: (config) => { videoEncoderConfig = config; request.onVideoEncoderConfig?.(config); },
-      onAudioEncoderConfig: (config) => { audioEncoderConfig = config; request.onAudioEncoderConfig?.(config); },
+      onEncoderConfig: (config) => {
+        const diagnostic = encoderConfigDiagnostic(config);
+        videoEncoderConfig = diagnostic;
+        request.onVideoEncoderConfig?.(diagnostic);
+      },
+      onAudioEncoderConfig: (config) => {
+        const diagnostic = encoderConfigDiagnostic(config);
+        audioEncoderConfig = diagnostic;
+        request.onAudioEncoderConfig?.(diagnostic);
+      },
     });
     assertNotAborted(request.signal);
     const expectedFrames = plan.frameCount;
