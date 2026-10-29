@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive, ArrowLeft, ArrowRight, ArrowLeftRight, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Download,
-  CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
+  CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen, Image as ImageIcon,
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, ListFilter, Maximize2,
   MoreHorizontal, Minimize2, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut, Scissors, Magnet,
@@ -54,7 +54,7 @@ function aspectRatioOf(width: number, height: number) {
   return `${width / divisor}:${height / divisor}`;
 }
 
-type SessionMediaSource = { url: string; name: string; blob: Blob };
+type SessionMediaSource = { url: string; name: string; blob?: Blob };
 type TimelineHistory = { past: Sequence[]; future: Sequence[] };
 const mediaKey = (projectId: string, assetId: string) => JSON.stringify([projectId, assetId]);
 const TIMELINE_HEIGHT_KEY = 'clipwright.workspace.timeline-height';
@@ -180,6 +180,13 @@ export default function App() {
   });
   const [documentStorageWarning, setDocumentStorageWarning] = useState(initialDocumentStore.issue);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [isStorageRestoring, setIsStorageRestoring] = useState(Boolean(window.clipwright?.library));
+  const [desktopLibraryReady, setDesktopLibraryReady] = useState(!window.clipwright?.library);
+  const [persistentStorageRoot, setPersistentStorageRoot] = useState<string | null>(null);
+  const [persistentStorageIssue, setPersistentStorageIssue] = useState<string | null>(null);
+  const [mediaImportMode, setMediaImportMode] = useState<'managed' | 'linked'>(() => window.clipwright?.library ? 'managed' : 'linked');
+  const persistentSaveQueuesRef = useRef(new Map<string, Promise<unknown>>());
+  const restoredMediaProjectIdsRef = useRef(new Set<string>());
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'project' | 'editor' | 'audio' | 'export' | 'storage' | 'appearance' | 'shortcuts'>('project');
@@ -201,6 +208,8 @@ export default function App() {
   const [recoveryPoints, setRecoveryPoints] = useState<ClipWrightRecoveryPoint[]>([]);
   const [isRestoringRecovery, setIsRestoringRecovery] = useState(false);
   const saveQueuesRef = useRef(new Map<string, Promise<unknown>>());
+  const closeSaveInFlightRef = useRef(false);
+  const closeAfterSaveRef = useRef(false);
   const sessionSourcesRef = useRef<Record<string, SessionMediaSource>>({});
   const [selectedMediaKey, setSelectedMediaKey] = useState<string | null>(null);
   const [pendingRelinkAssetId, setPendingRelinkAssetId] = useState<string | null>(null);
@@ -210,13 +219,14 @@ export default function App() {
   const projectFileInputRef = useRef<HTMLInputElement>(null);
   const videoFileInputRef = useRef<HTMLInputElement>(null);
   const audioFileInputRef = useRef<HTMLInputElement>(null);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const activeProjectDocument = documents.find((document) => document.id === activeProjectId) ?? null;
   const activeSequence = activeProjectDocument?.sequences.find((item) => item.id === activeProjectDocument.projectSettings.defaultSequenceId) ?? null;
   const editorAspectRatio = activeSequence ? aspectRatioOf(activeSequence.width, activeSequence.height) : activeProject?.aspectRatio ?? '16:9';
   const editorFrameRate = activeSequence ? formatFrameRate(activeSequence.frameRate.numerator / activeSequence.frameRate.denominator) : formatFrameRate(activeProject?.frameRate ?? 30);
-  const persistenceWarning = storageWarning ?? documentStorageWarning;
+  const persistenceWarning = storageWarning ?? documentStorageWarning ?? (persistentStorageIssue ? 'storage-unavailable' as const : null);
   const visibleProjects = useMemo(() => projects
     .filter((project) => project.archived === showArchived)
     .filter((project) => project.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
@@ -256,6 +266,144 @@ export default function App() {
   }, [documents, documentStorageWarning]);
 
   useEffect(() => {
+    const library = window.clipwright?.library;
+    if (!library) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snapshot = await library.initialize();
+        if (cancelled) return;
+        setPersistentStorageRoot(snapshot.root);
+        const restoreIssues = [...snapshot.issues.map((issue) => issue.message)];
+        const diskDocuments: ProjectDocument[] = [];
+        for (const record of snapshot.projects) {
+          try {
+            const restored = parseProjectDocument(record.contents);
+            if (restored.id !== record.documentId) throw new Error('Project manifest identity does not match its index.');
+            diskDocuments.push(restored);
+          } catch (error) { restoreIssues.push(error instanceof Error ? error.message : 'A project manifest could not be restored.'); }
+        }
+        const freshest = new Map(diskDocuments.map((document) => [document.id, document]));
+        for (const localDocument of documents) {
+          const diskDocument = freshest.get(localDocument.id);
+          if (!diskDocument || Date.parse(localDocument.metadata.modifiedAt) > Date.parse(diskDocument.metadata.modifiedAt)) freshest.set(localDocument.id, localDocument);
+        }
+        const restoredDocuments = [...freshest.values()];
+        const mergedProjects = new Map(projects.map((project) => [project.id, project]));
+        for (const document of restoredDocuments) {
+          const sequence = document.sequences.find((item) => item.id === document.projectSettings.defaultSequenceId);
+          if (!sequence) { restoreIssues.push(`Project “${document.metadata.name}” has no default sequence.`); continue; }
+          const previous = mergedProjects.get(document.id);
+          mergedProjects.set(document.id, {
+            id: document.id, name: document.metadata.name, createdAt: document.metadata.createdAt, updatedAt: document.metadata.modifiedAt,
+            aspectRatio: aspectRatioOf(sequence.width, sequence.height), frameRate: sequence.frameRate.numerator / sequence.frameRate.denominator,
+            archived: previous?.archived ?? false, favorite: previous?.favorite ?? false,
+          });
+        }
+        if (cancelled) return;
+        setProjects([...mergedProjects.values()]);
+        setDocuments(restoredDocuments);
+        if (diskDocuments.length && restoreIssues.length === 0) { setStorageWarning(null); setDocumentStorageWarning(null); }
+        let lastProjectId: string | null = null;
+        try { lastProjectId = window.localStorage.getItem('clipwright.workspace.last-project'); }
+        catch { /* Last-opened restoration is optional when profile storage is unavailable. */ }
+        const lastDocument = lastProjectId ? restoredDocuments.find((document) => document.id === lastProjectId) : null;
+        if (lastProjectId && lastDocument && mergedProjects.has(lastProjectId)) {
+          setActiveProjectId(lastProjectId);
+          setWorkspace('editor');
+          if (restoreIssues.length === 0) {
+            try {
+              await library.saveProject({ contents: serializeProjectDocument(lastDocument) });
+              const resolved = await library.resolveMedia(lastProjectId);
+              if (cancelled) return;
+              const restoredSources = { ...sessionSourcesRef.current };
+              for (const item of resolved) {
+                if (!item.available || !item.mediaUrl) continue;
+                const asset = lastDocument.assets.find((candidate) => candidate.id === item.assetId);
+                restoredSources[mediaKey(lastProjectId, item.assetId)] = { url: item.mediaUrl, name: asset?.name ?? item.assetId };
+              }
+              sessionSourcesRef.current = restoredSources;
+              setSessionSources(restoredSources);
+              restoredMediaProjectIdsRef.current.add(lastProjectId);
+            } catch (error) { restoreIssues.push(error instanceof Error ? error.message : 'The last project could not be restored from disk.'); }
+          }
+        }
+        setPersistentStorageIssue(restoreIssues.length ? restoreIssues.join(' ') : null);
+        setDesktopLibraryReady(restoreIssues.length === 0);
+      } catch (error) {
+        if (cancelled) return;
+        setPersistentStorageIssue(error instanceof Error ? error.message : 'The ClipWright project library could not be opened.');
+        setDesktopLibraryReady(false);
+      } finally {
+        if (!cancelled) setIsStorageRestoring(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  // Startup snapshot only: merge disk with the first in-memory/localStorage snapshot before enabling persistence.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    try { window.localStorage.setItem('clipwright.workspace.last-project', activeProjectId); }
+    catch { /* Last-opened restoration is optional when profile storage is unavailable. */ }
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    const library = window.clipwright?.library;
+    if (!library || !desktopLibraryReady || isStorageRestoring || persistentStorageIssue) return;
+    const timers: number[] = [];
+    for (const projectDocument of documents) {
+      const timer = window.setTimeout(() => {
+        let contents: string;
+        try { contents = serializeProjectDocument(projectDocument); }
+        catch { setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'error' })); return; }
+        setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'saving' }));
+        const previous = persistentSaveQueuesRef.current.get(projectDocument.id) ?? Promise.resolve();
+        const operation = previous.catch(() => undefined).then(() => library.saveProject({ contents }));
+        persistentSaveQueuesRef.current.set(projectDocument.id, operation);
+        void operation.then(() => {
+          if (persistentSaveQueuesRef.current.get(projectDocument.id) === operation) setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'saved' }));
+        }).catch(() => {
+          if (persistentSaveQueuesRef.current.get(projectDocument.id) === operation) setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'error' }));
+        });
+      }, Math.max(300, preferences.storage.autosaveIntervalSeconds * 1000));
+      timers.push(timer);
+    }
+    return () => timers.forEach(window.clearTimeout);
+  }, [documents, desktopLibraryReady, isStorageRestoring, persistentStorageIssue, preferences.storage.autosaveIntervalSeconds]);
+
+  useEffect(() => {
+    const library = window.clipwright?.library;
+    if (!library || !desktopLibraryReady || isStorageRestoring || !activeProjectId || restoredMediaProjectIdsRef.current.has(activeProjectId)) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const projectDocument = documents.find((document) => document.id === activeProjectId);
+        if (projectDocument && !persistentStorageIssue) await library.saveProject({ contents: serializeProjectDocument(projectDocument) });
+        const resolved = await library.resolveMedia(activeProjectId);
+        if (cancelled) return;
+        const next = { ...sessionSourcesRef.current };
+        for (const item of resolved) {
+          if (!item.available || !item.mediaUrl) continue;
+          const key = mediaKey(activeProjectId, item.assetId);
+          if (next[key]) continue;
+          const asset = projectDocument?.assets.find((candidate) => candidate.id === item.assetId);
+          next[key] = { url: item.mediaUrl, name: asset?.name ?? item.assetId };
+        }
+        sessionSourcesRef.current = next;
+        setSessionSources(next);
+        restoredMediaProjectIdsRef.current.add(activeProjectId);
+      } catch (error) {
+        if (!cancelled) setPersistentStorageIssue(error instanceof Error ? error.message : 'Project media could not be restored.');
+      }
+    })();
+    return () => { cancelled = true; };
+  // Opened project changes are the restore boundary; the app library validates each project manifest.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProjectId, desktopLibraryReady, isStorageRestoring]);
+
+  useEffect(() => {
     const desktopFiles = window.clipwright?.projectFiles;
     if (!desktopFiles) return;
     const timers: number[] = [];
@@ -284,6 +432,46 @@ export default function App() {
     }
     return () => timers.forEach(window.clearTimeout);
   }, [documents, managedProjectFiles, preferences.storage.autosaveIntervalSeconds]);
+
+  useEffect(() => {
+    if (!window.clipwright?.library || !desktopLibraryReady || isStorageRestoring || persistentStorageIssue) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (closeAfterSaveRef.current) return;
+      event.preventDefault();
+      if (isReadingMedia) {
+        notify('Wait for the current media import to finish before closing the editor.', 'error');
+        return;
+      }
+      if (closeSaveInFlightRef.current) return;
+      closeSaveInFlightRef.current = true;
+      let snapshots: Array<{ projectDocument: ProjectDocument; linkedFile: ManagedProjectFile | undefined; contents: string }>;
+      try {
+        snapshots = documents.map((projectDocument) => ({
+          projectDocument,
+          linkedFile: managedProjectFiles[projectDocument.id],
+          contents: serializeProjectDocument(projectDocument),
+        }));
+      } catch (error) {
+        closeSaveInFlightRef.current = false;
+        notify(error instanceof Error ? `Could not validate every project before closing: ${error.message}` : 'Could not validate every project before closing.', 'error');
+        return;
+      }
+      void Promise.all(snapshots.map(async ({ projectDocument, linkedFile, contents }) => {
+        await enqueuePersistentSave(projectDocument.id, contents);
+        if (linkedFile) await enqueueDesktopSave(projectDocument.id, linkedFile.handle, contents);
+        setDiskSaveStates((current) => ({ ...current, [projectDocument.id]: 'saved' }));
+      })).then(() => {
+        closeAfterSaveRef.current = true;
+        window.close();
+      }).catch((error) => {
+        closeSaveInFlightRef.current = false;
+        setDiskSaveStates((current) => ({ ...current, ...Object.fromEntries(snapshots.map(({ projectDocument }) => [projectDocument.id, 'error' as const])) }));
+        notify(error instanceof Error ? `Could not save every project before closing: ${error.message}` : 'Could not save every project before closing.', 'error');
+      });
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [documents, managedProjectFiles, desktopLibraryReady, isStorageRestoring, persistentStorageIssue, isReadingMedia]);
 
   useEffect(() => {
     try { window.localStorage.setItem('clipwright.theme', theme); }
@@ -339,6 +527,15 @@ export default function App() {
     if (kind !== 'error') window.setTimeout(() => setToast((current) => current?.id === id ? null : current), 3200);
   }
 
+  function enqueuePersistentSave(projectId: string, contents: string) {
+    const library = window.clipwright?.library;
+    if (!library) return Promise.reject(new Error('Persistent project storage is available only in the desktop app.'));
+    const previous = persistentSaveQueuesRef.current.get(projectId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(() => library.saveProject({ contents }));
+    persistentSaveQueuesRef.current.set(projectId, operation);
+    return operation;
+  }
+
   function enqueueDesktopSave(projectId: string, handle: string, contents: string) {
     const desktopFiles = window.clipwright?.projectFiles;
     if (!desktopFiles) return Promise.reject(new Error('Managed project files are available only in the desktop app.'));
@@ -349,14 +546,28 @@ export default function App() {
   }
 
   async function saveProjectFile(projectId: string) {
+    const projectDocument = documents.find((entry) => entry.id === projectId);
+    if (!projectDocument) { notify('No validated project document is available to save.', 'error'); return; }
+    const library = window.clipwright?.library;
+    if (library) {
+      try {
+        const contents = serializeProjectDocument(projectDocument);
+        setDiskSaveStates((current) => ({ ...current, [projectId]: 'saving' }));
+        await enqueuePersistentSave(projectId, contents);
+        setDiskSaveStates((current) => ({ ...current, [projectId]: 'saved' }));
+        notify('Project saved to the ClipWright library.');
+      } catch (error) {
+        setDiskSaveStates((current) => ({ ...current, [projectId]: 'error' }));
+        notify(error instanceof Error ? error.message : 'Could not save the project to the ClipWright library.', 'error');
+      }
+      return;
+    }
     const desktopFiles = window.clipwright?.projectFiles;
     if (!desktopFiles) {
       const project = projects.find((entry) => entry.id === projectId);
       if (project) downloadProjectFile(project);
       return;
     }
-    const projectDocument = documents.find((entry) => entry.id === projectId);
-    if (!projectDocument) { notify('No validated project document is available to save.', 'error'); return; }
     const linkedFile = managedProjectFiles[projectId];
     if (!linkedFile) { await saveProjectFileAs(projectId); return; }
     try {
@@ -426,6 +637,7 @@ export default function App() {
         archived: existingProject?.archived ?? false,
         favorite: existingProject?.favorite ?? false,
       };
+      if (window.clipwright?.library) await window.clipwright.library.saveProject({ contents: serializeProjectDocument(incomingDocument) });
       clearSessionMediaForProject(project.id, documents.find((entry) => entry.id === project.id));
       setProjects((current) => existingProject
         ? current.map((entry) => entry.id === project.id ? project : entry)
@@ -518,6 +730,13 @@ export default function App() {
     audioFileInputRef.current?.click();
   }
 
+  function requestImageImport(assetId?: string) {
+    if (mediaImportInFlightRef.current) { notify('Wait for the current media read to finish before importing another file.', 'warning'); return; }
+    if (!activeProjectId || persistenceWarning) { notify('Open a project with writable storage before importing an image.', 'error'); return; }
+    setPendingRelinkAssetId(assetId ?? null);
+    imageFileInputRef.current?.click();
+  }
+
   async function importVideoFile(file: File | null) {
     if (!file) { setPendingRelinkAssetId(null); return; }
     if (mediaImportInFlightRef.current) { setPendingRelinkAssetId(null); notify('Wait for the current media read to finish.', 'warning'); return; }
@@ -561,24 +780,23 @@ export default function App() {
         height: metadata.height,
         metadataSource: 'browser',
       };
-      const asset: MediaAsset = targetAsset
-        ? {
-          ...targetAsset,
-          name: safeFileName,
-          sourcePath: safeFileName,
-          pathKind: 'browser-session',
-          fileSizeBytes: file.size,
-          streams: { ...targetAsset.streams, video: videoStream },
-        }
-        : {
-          id: crypto.randomUUID(),
-          name: safeFileName,
-          sourcePath: safeFileName,
-          pathKind: 'browser-session',
-          kind: 'video',
-          streams: { video: videoStream },
-          fileSizeBytes: file.size,
-        };
+      const assetId = targetAsset?.id ?? crypto.randomUUID();
+      const persisted = window.clipwright?.library
+        ? await window.clipwright.library.importFile(file, { projectId: projectId!, assetId, mode: mediaImportMode })
+        : null;
+      if (targetAsset && persisted && targetAsset.fingerprint && targetAsset.fingerprint !== persisted.fingerprint
+        && !window.confirm(`The selected file differs from the recorded fingerprint for “${targetAsset.name}”. Relink it anyway and keep its timeline edits?`)) return;
+      if (targetAsset && !persisted && targetAsset.fileSizeBytes !== undefined && targetAsset.fileSizeBytes !== file.size
+        && !window.confirm(`The selected file size differs from “${targetAsset.name}”. Use it as the replacement and keep its timeline edits?`)) return;
+      const asset: MediaAsset = {
+        ...(targetAsset ?? { id: assetId, kind: 'video' as const, streams: {} }),
+        name: safeFileName,
+        sourcePath: persisted?.sourcePath ?? safeFileName,
+        pathKind: persisted?.pathKind ?? 'browser-session',
+        fileSizeBytes: persisted?.fileSizeBytes ?? file.size,
+        fingerprint: persisted?.fingerprint,
+        streams: { ...targetAsset?.streams, video: videoStream },
+      };
       const updatedDocument: ProjectDocument = {
         ...projectDocument,
         metadata: { ...projectDocument.metadata, modifiedAt: new Date().toISOString() },
@@ -586,19 +804,26 @@ export default function App() {
           ? projectDocument.assets.map((entry) => entry.id === targetAsset.id ? asset : entry)
           : [...projectDocument.assets, asset],
       };
-      serializeProjectDocument(updatedDocument); // Validate before changing either persisted project store.
+      const serializedDocument = serializeProjectDocument(updatedDocument);
+      if (window.clipwright?.library) await window.clipwright.library.saveProject({ contents: serializedDocument });
 
       const key = mediaKey(projectId!, asset.id);
       const oldUrl = sessionSourcesRef.current[key]?.url;
-      if (oldUrl) URL.revokeObjectURL(oldUrl);
-      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName, blob: file } };
+      if (oldUrl?.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+      const playbackUrl = persisted?.mediaUrl ?? objectUrl;
+      if (persisted && objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+      const nextSources = { ...sessionSourcesRef.current, [key]: { url: playbackUrl, name: safeFileName, blob: file } };
       sessionSourcesRef.current = nextSources;
       setSessionSources(nextSources);
       setDocuments((current) => current.map((entry) => entry.id === projectId ? updatedDocument : entry));
       setProjects((current) => current.map((entry) => entry.id === projectId ? { ...entry, updatedAt: updatedDocument.metadata.modifiedAt } : entry));
       setSelectedMediaKey(key);
-      objectUrl = null; // The session source registry now owns the URL and revokes it on replacement/unmount.
-      notify(`Metadata read · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`);
+      if (objectUrl) objectUrl = null; // The session source registry now owns the URL and revokes it on replacement/unmount.
+      notify(persisted?.mode === 'managed'
+        ? `Managed copy verified · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`
+        : persisted?.mode === 'linked'
+          ? `Linked external video · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`
+          : `Session-only video · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not read video metadata in this browser.', 'error');
     } finally {
@@ -648,24 +873,23 @@ export default function App() {
           ? Math.round(metadata.durationSeconds * timeBase.denominator / timeBase.numerator)
           : metadata.durationTicks,
       };
-      const asset: MediaAsset = targetAsset
-        ? {
-          ...targetAsset,
-          name: safeFileName,
-          sourcePath: safeFileName,
-          pathKind: 'browser-session',
-          fileSizeBytes: file.size,
-          streams: { ...targetAsset.streams, audio: audioStream },
-        }
-        : {
-          id: crypto.randomUUID(),
-          name: safeFileName,
-          sourcePath: safeFileName,
-          pathKind: 'browser-session',
-          kind: 'audio',
-          streams: { audio: audioStream },
-          fileSizeBytes: file.size,
-        };
+      const assetId = targetAsset?.id ?? crypto.randomUUID();
+      const persisted = window.clipwright?.library
+        ? await window.clipwright.library.importFile(file, { projectId: projectId!, assetId, mode: mediaImportMode })
+        : null;
+      if (targetAsset && persisted && targetAsset.fingerprint && targetAsset.fingerprint !== persisted.fingerprint
+        && !window.confirm(`The selected file differs from the recorded fingerprint for “${targetAsset.name}”. Relink it anyway and keep its timeline edits?`)) return;
+      if (targetAsset && !persisted && targetAsset.fileSizeBytes !== undefined && targetAsset.fileSizeBytes !== file.size
+        && !window.confirm(`The selected file size differs from “${targetAsset.name}”. Use it as the replacement and keep its timeline edits?`)) return;
+      const asset: MediaAsset = {
+        ...(targetAsset ?? { id: assetId, kind: 'audio' as const, streams: {} }),
+        name: safeFileName,
+        sourcePath: persisted?.sourcePath ?? safeFileName,
+        pathKind: persisted?.pathKind ?? 'browser-session',
+        fileSizeBytes: persisted?.fileSizeBytes ?? file.size,
+        fingerprint: persisted?.fingerprint,
+        streams: { ...targetAsset?.streams, audio: audioStream },
+      };
       const updatedDocument: ProjectDocument = {
         ...projectDocument,
         metadata: { ...projectDocument.metadata, modifiedAt: new Date().toISOString() },
@@ -673,21 +897,93 @@ export default function App() {
           ? projectDocument.assets.map((entry) => entry.id === targetAsset.id ? asset : entry)
           : [...projectDocument.assets, asset],
       };
-      serializeProjectDocument(updatedDocument);
+      const serializedDocument = serializeProjectDocument(updatedDocument);
+      if (window.clipwright?.library) await window.clipwright.library.saveProject({ contents: serializedDocument });
       const key = mediaKey(projectId!, asset.id);
       const oldUrl = sessionSourcesRef.current[key]?.url;
-      if (oldUrl) URL.revokeObjectURL(oldUrl);
-      const nextSources = { ...sessionSourcesRef.current, [key]: { url: objectUrl, name: safeFileName, blob: file } };
+      if (oldUrl?.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+      const playbackUrl = persisted?.mediaUrl ?? objectUrl;
+      if (persisted && objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+      const nextSources = { ...sessionSourcesRef.current, [key]: { url: playbackUrl, name: safeFileName, blob: file } };
       sessionSourcesRef.current = nextSources;
       setSessionSources(nextSources);
       setDocuments((current) => current.map((entry) => entry.id === projectId ? updatedDocument : entry));
       setProjects((current) => current.map((entry) => entry.id === projectId ? { ...entry, updatedAt: updatedDocument.metadata.modifiedAt } : entry));
       setSelectedMediaKey(key);
-      objectUrl = null;
-      notify(`Audio metadata read · ${safeFileName} · ${metadata.durationSeconds.toFixed(2)} s.`);
+      if (objectUrl) objectUrl = null;
+      notify(persisted?.mode === 'managed' ? `Managed audio copy verified · ${safeFileName} · ${metadata.durationSeconds.toFixed(2)} s.`
+        : persisted?.mode === 'linked' ? `Linked external audio · ${safeFileName} · ${metadata.durationSeconds.toFixed(2)} s.`
+          : `Session-only audio · ${safeFileName} · ${metadata.durationSeconds.toFixed(2)} s.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not read audio metadata in this browser.', 'error');
     } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      mediaImportInFlightRef.current = false;
+      setPendingRelinkAssetId(null);
+      setIsReadingMedia(false);
+    }
+  }
+
+  async function importImageFile(file: File | null) {
+    if (!file) { setPendingRelinkAssetId(null); return; }
+    if (mediaImportInFlightRef.current) { setPendingRelinkAssetId(null); notify('Wait for the current media read to finish.', 'warning'); return; }
+    const projectId = activeProjectId;
+    const projectDocument = documents.find((entry) => entry.id === projectId);
+    if (!projectId || !projectDocument) { setPendingRelinkAssetId(null); notify('The active project document is unavailable; image was not imported.', 'error'); return; }
+    const targetAsset = pendingRelinkAssetId ? projectDocument.assets.find((asset) => asset.id === pendingRelinkAssetId && asset.kind === 'image') : undefined;
+    if (pendingRelinkAssetId && !targetAsset) { setPendingRelinkAssetId(null); notify('This project has no matching image asset to relink.', 'error'); return; }
+    let safeFileName: string;
+    try { safeFileName = prepareLocalMediaFile(file, 'image'); }
+    catch (error) { setPendingRelinkAssetId(null); notify(error instanceof Error ? error.message : 'Choose a readable local image.', 'error'); return; }
+    let objectUrl: string | null = null;
+    mediaImportInFlightRef.current = true;
+    setIsReadingMedia(true);
+    try {
+      objectUrl = URL.createObjectURL(file);
+      const bitmap = await createImageBitmap(file);
+      const imageDimensions = { width: bitmap.width, height: bitmap.height };
+      bitmap.close();
+      if (imageDimensions.width > 16384 || imageDimensions.height > 16384) throw new Error('Image dimensions exceed the 16384 pixel project safety limit.');
+      const assetId = targetAsset?.id ?? crypto.randomUUID();
+      const persisted = window.clipwright?.library
+        ? await window.clipwright.library.importFile(file, { projectId, assetId, mode: mediaImportMode })
+        : null;
+      if (targetAsset && persisted && targetAsset.fingerprint && targetAsset.fingerprint !== persisted.fingerprint
+        && !window.confirm(`The selected image differs from the recorded fingerprint for “${targetAsset.name}”. Relink it and keep the project state?`)) return;
+      const asset: MediaAsset = {
+        ...(targetAsset ?? { id: assetId, kind: 'image' as const, streams: {} }),
+        name: safeFileName,
+        sourcePath: persisted?.sourcePath ?? safeFileName,
+        pathKind: persisted?.pathKind ?? 'browser-session',
+        fileSizeBytes: persisted?.fileSizeBytes ?? file.size,
+        fingerprint: persisted?.fingerprint,
+        imageDimensions,
+        streams: {},
+      };
+      const updatedDocument: ProjectDocument = {
+        ...projectDocument,
+        metadata: { ...projectDocument.metadata, modifiedAt: new Date().toISOString() },
+        assets: targetAsset ? projectDocument.assets.map((entry) => entry.id === targetAsset.id ? asset : entry) : [...projectDocument.assets, asset],
+      };
+      const contents = serializeProjectDocument(updatedDocument);
+      if (window.clipwright?.library) await window.clipwright.library.saveProject({ contents });
+      const key = mediaKey(projectId, asset.id);
+      const oldUrl = sessionSourcesRef.current[key]?.url;
+      if (oldUrl?.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+      const playbackUrl = persisted?.mediaUrl ?? objectUrl;
+      if (persisted && objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+      const nextSources = { ...sessionSourcesRef.current, [key]: { url: playbackUrl, name: safeFileName, blob: file } };
+      sessionSourcesRef.current = nextSources;
+      setSessionSources(nextSources);
+      setDocuments((current) => current.map((entry) => entry.id === projectId ? updatedDocument : entry));
+      setProjects((current) => current.map((entry) => entry.id === projectId ? { ...entry, updatedAt: updatedDocument.metadata.modifiedAt } : entry));
+      setSelectedMediaKey(key);
+      if (objectUrl) objectUrl = null;
+      notify(persisted?.mode === 'managed' ? `Managed image copy verified · ${safeFileName} · ${imageDimensions.width} × ${imageDimensions.height}.`
+        : persisted?.mode === 'linked' ? `Linked external image · ${safeFileName} · ${imageDimensions.width} × ${imageDimensions.height}.`
+          : `Session-only image · ${safeFileName} · ${imageDimensions.width} × ${imageDimensions.height}.`);
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not read this image.', 'error'); }
+    finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       mediaImportInFlightRef.current = false;
       setPendingRelinkAssetId(null);
@@ -793,8 +1089,8 @@ export default function App() {
   function undoTimelineEdit() { return changeTimelineHistory(activeProjectId, 'undo'); }
   function redoTimelineEdit() { return changeTimelineHistory(activeProjectId, 'redo'); }
 
-  function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate'], dimensions: { width: number; height: number }) {
-    if (storageWarning || documentStorageWarning) {
+  async function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate'], dimensions: { width: number; height: number }) {
+    if (persistenceWarning) {
       notify('Resolve the project storage warning before creating a project.', 'error');
       return;
     }
@@ -809,6 +1105,10 @@ export default function App() {
           : sequence),
       };
       if (!Number.isSafeInteger(dimensions.width) || !Number.isSafeInteger(dimensions.height) || dimensions.width < 16 || dimensions.height < 16 || dimensions.width > 16384 || dimensions.height > 16384) throw new Error('Canvas dimensions must be whole pixels from 16 to 16384.');
+      if (window.clipwright?.library) {
+        await window.clipwright.library.saveProject({ contents: serializeProjectDocument(document) });
+        setDiskSaveStates((current) => ({ ...current, [project.id]: 'saved' }));
+      }
       setDocuments((current) => [...current.filter((item) => item.id !== project.id), document]);
       setProjects((current) => [project, ...current]);
       setActiveProjectId(project.id);
@@ -942,7 +1242,7 @@ export default function App() {
     return true;
   }
 
-  function duplicateProject(project: Project) {
+  async function duplicateProject(project: Project) {
     if (documentStorageWarning) {
       notify('Recover project-document storage before duplicating this project.', 'error');
       return;
@@ -954,14 +1254,23 @@ export default function App() {
     }
     const now = new Date().toISOString();
     const copy = { ...project, id: crypto.randomUUID(), name: `${project.name} copy`, createdAt: now, updatedAt: now, favorite: false, archived: false };
-    setProjects((current) => [copy, ...current]);
-    setDocuments((current) => [...current, { ...sourceDocument, id: copy.id, metadata: { ...sourceDocument.metadata, name: copy.name, createdAt: now, modifiedAt: now } }]);
-    notify('Project document duplicated. Source media is referenced, not copied.');
+    const copyDocument = { ...sourceDocument, id: copy.id, metadata: { ...sourceDocument.metadata, name: copy.name, createdAt: now, modifiedAt: now } };
+    try {
+      if (window.clipwright?.library) {
+        await window.clipwright.library.saveProject({ contents: serializeProjectDocument(sourceDocument) });
+        await window.clipwright.library.cloneProject({ sourceProjectId: project.id, contents: serializeProjectDocument(copyDocument) });
+      }
+      setProjects((current) => [copy, ...current]);
+      setDocuments((current) => [...current, copyDocument]);
+      notify(window.clipwright?.library ? 'Project duplicated with its managed media copied locally; linked media still points to its original.' : 'Project document duplicated. Browser-session media must be relinked after restart.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not duplicate the project safely.', 'error'); }
   }
 
-  function deleteProject(project: Project) {
-    const confirmed = window.confirm(`Delete “${project.name}” from this project list? This removes only its local project entry; it does not delete source media.`);
+  async function deleteProject(project: Project) {
+    const confirmed = window.confirm(`Remove “${project.name}” from the project library? Its project manifest will be archived and managed/source media will not be deleted.`);
     if (!confirmed) return;
+    try { await window.clipwright?.library?.archiveProject(project.id); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not archive the project safely.', 'error'); return; }
     setProjects((current) => current.filter((item) => item.id !== project.id));
     const removedDocument = documents.find((document) => document.id === project.id);
     if (removedDocument) {
@@ -979,7 +1288,53 @@ export default function App() {
     setTimelineHistory((current) => { const next = { ...current }; delete next[project.id]; return next; });
     if (activeProjectId === project.id) { setActiveProjectId(null); setWorkspace('home'); }
     if (removedDocument?.assets.some((asset) => mediaKey(project.id, asset.id) === selectedMediaKey)) setSelectedMediaKey(null);
-    notify('Project entry deleted. Source media was left untouched.');
+    notify('Project manifest archived; managed media was preserved.');
+  }
+
+  async function openPersistentDataFolder() {
+    const library = window.clipwright?.library;
+    if (!library) { notify('Persistent app-data folders are available in the desktop app.', 'warning'); return; }
+    try { await library.openDataFolder(); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not open the ClipWright data folder.', 'error'); }
+  }
+
+  async function createProjectBackup() {
+    if (!activeProjectId || !window.clipwright?.library) { notify('Open a project in the desktop app before creating a backup.', 'warning'); return; }
+    const includeLinked = window.confirm('Include externally linked source files in this backup? Choosing OK copies them into the backup; choosing Cancel leaves them external and lists them as not included.');
+    try {
+      const result = await window.clipwright.library.createBackup({ projectId: activeProjectId, includeLinked });
+      if (result.canceled) return;
+      notify(result.externalNotCollected.length
+        ? `Backup created with ${result.externalNotCollected.length} external or unavailable media reference${result.externalNotCollected.length === 1 ? '' : 's'} not collected.`
+        : 'Portable project backup created and verified.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not create a project backup.', 'error'); }
+  }
+
+  async function restoreProjectBackup() {
+    const library = window.clipwright?.library;
+    if (!library) { notify('Backup restoration is available in the desktop app.', 'warning'); return; }
+    try {
+      const result = await library.restoreBackup();
+      if (result.canceled) return;
+      const restored = parseProjectDocument(result.contents);
+      if (restored.id !== result.documentId) throw new Error('Restored project identity is invalid.');
+      const sequence = restored.sequences.find((item) => item.id === restored.projectSettings.defaultSequenceId);
+      if (!sequence) throw new Error('Restored project has no default sequence.');
+      const project: Project = { id: restored.id, name: restored.metadata.name, createdAt: restored.metadata.createdAt, updatedAt: restored.metadata.modifiedAt, aspectRatio: aspectRatioOf(sequence.width, sequence.height), frameRate: sequence.frameRate.numerator / sequence.frameRate.denominator, archived: false, favorite: false };
+      setProjects((current) => [project, ...current.filter((entry) => entry.id !== project.id)]);
+      setDocuments((current) => [restored, ...current.filter((entry) => entry.id !== restored.id)]);
+      setActiveProjectId(restored.id);
+      setWorkspace('editor');
+      notify(`Restored “${restored.metadata.name}” from backup.`);
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not restore this project backup.', 'error'); }
+  }
+
+  async function clearPersistentCache() {
+    try {
+      const result = await window.clipwright?.library?.clearCache();
+      window.dispatchEvent(new Event('clipwright:clear-waveform-cache'));
+      notify(result ? `Temporary cache cleared (${result.removedEntries} item${result.removedEntries === 1 ? '' : 's'}). Managed media, projects, and exports were preserved.` : 'In-memory waveform cache cleared.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not clear the temporary cache.', 'error'); }
   }
 
   const navigate = (next: Workspace) => {
@@ -1039,6 +1394,8 @@ export default function App() {
     }), 'Changed the project frame rate and frame-aligned timeline clips.');
   }
 
+  if (isStorageRestoring) return <main className="workspace-restoring" role="status" aria-live="polite"><img src="/assets/clipwright-icon.png" alt="" /><span className="eyebrow">CLIPWRIGHT STUDIO</span><h1>Restoring your workspace…</h1><p>Loading your recent projects and checking their local media references.</p><div className="restore-progress" /></main>;
+
   return (
     <div className={`app-shell ${workspace === 'editor' ? 'is-editor' : ''} ${workspace === 'editor' && editorNavCollapsed ? 'is-editor-nav-collapsed' : ''} ${editorFocusMode ? 'is-editor-focus' : ''}`} data-testid="app-shell">
       <a className="skip-to-content" href="#main-content">Skip to main content</a>
@@ -1071,7 +1428,7 @@ export default function App() {
             <button className="editor-back-button" type="button" onClick={() => navigate('home')} aria-label="Back to projects" title="Back to projects"><ArrowLeft size={17} /></button>
             <h1 className="editor-topbar-project" title={activeProject?.name ?? 'Editor'}>{activeProject?.name ?? 'Editor'}</h1>
             <div className="editor-meta-badges" aria-label="Project settings and save status">
-              <span>{editorAspectRatio}</span><span>{editorFrameRate}</span><span className={`editor-saved ${diskSaveStates[activeProjectId ?? ''] === 'error' ? 'editor-save-error' : ''}`} title={managedProjectFiles[activeProjectId ?? ''] ? managedProjectFiles[activeProjectId ?? ''].fileName : 'Stored in this browser profile'}>{diskSaveStates[activeProjectId ?? ''] === 'saving' ? <><Save size={12} />Saving…</> : diskSaveStates[activeProjectId ?? ''] === 'error' ? <><X size={12} />Disk save failed</> : <><Check size={12} />{managedProjectFiles[activeProjectId ?? ''] ? 'Saved to file' : 'Saved locally'}</>}</span>
+              <span>{editorAspectRatio}</span><span>{editorFrameRate}</span><span className={`editor-saved ${diskSaveStates[activeProjectId ?? ''] === 'error' ? 'editor-save-error' : ''}`} title={managedProjectFiles[activeProjectId ?? ''] ? managedProjectFiles[activeProjectId ?? ''].fileName : persistentStorageRoot ?? 'Stored in this browser profile'}>{diskSaveStates[activeProjectId ?? ''] === 'saving' ? <><Save size={12} />Saving…</> : diskSaveStates[activeProjectId ?? ''] === 'error' ? <><X size={12} />Disk save failed</> : <><Check size={12} />{managedProjectFiles[activeProjectId ?? ''] ? 'Saved to file' : window.clipwright?.library ? 'Saved to library' : 'Saved locally'}</>}</span>
             </div>
           </div> : <div className="brand-title"><span className="wordmark">ClipWright</span><span className="brand-studio">STUDIO</span><span className="version-tag">EARLY ACCESS</span></div>}
           <div className="topbar-actions">
@@ -1141,7 +1498,7 @@ export default function App() {
                   <div className="empty-art"><div className="art-window"><div className="art-topline" /><div className="art-preview"><Film size={28} strokeWidth={1.2} /></div><div className="art-timeline"><i /><i /><i /></div></div><span className="art-spark spark-one" /><span className="art-spark spark-two" /></div>
                   <div className="eyebrow">A CLEAR START</div><h2>Make room for your next story.</h2><p>Create a project to begin. Your workspace stays on this device, and your original media remains untouched.</p>
                   <button className="button button-primary" onClick={() => setShowCreate(true)} disabled={!!persistenceWarning} title={persistenceWarning ? 'Resolve the storage warning before creating projects' : undefined}><Plus size={17} />Create your first project</button>
-                  <span className="empty-footnote"><HardDrive size={13} />Project list stored in this browser profile</span>
+                  <span className="empty-footnote"><HardDrive size={13} />{window.clipwright?.library ? 'Projects restore from this device’s ClipWright library' : 'Project list stored in this browser profile'}</span>
                 </div>
               )}
               </div>
@@ -1163,9 +1520,18 @@ export default function App() {
             onToggleFocusMode={() => setEditorFocusMode((focus) => !focus)}
             onImportVideo={() => requestVideoImport()}
             onImportAudio={() => requestAudioImport()}
+            onImportImage={() => requestImageImport()}
+            onRelinkImage={(assetId) => requestImageImport(assetId)}
             onRelinkVideo={(assetId) => requestVideoImport(assetId)}
             onRelinkAudio={(assetId) => requestAudioImport(assetId)}
             onSelectMedia={setSelectedMediaKey}
+            onRevealMedia={(assetId) => {
+              const library = window.clipwright?.library;
+              if (library && activeProjectId) void library.revealMedia({ projectId: activeProjectId, assetId }).catch((error) => notify(error instanceof Error ? error.message : 'Could not reveal this media file.', 'error'));
+            }}
+            mediaImportMode={mediaImportMode}
+            onMediaImportModeChange={setMediaImportMode}
+            hasPersistentLibrary={Boolean(window.clipwright?.library)}
             onApplyTimelineEdit={(edit, message) => activeProjectId ? applyTimelineEdit(activeProjectId, edit, message) : false}
             onToggleTrackState={toggleTrackState}
             canUndo={Boolean(!persistenceWarning && activeProjectId && timelineHistory[activeProjectId]?.past.length)}
@@ -1182,6 +1548,7 @@ export default function App() {
       <input ref={projectFileInputRef} hidden type="file" accept=".cwproject,application/json" aria-label="Choose a ClipWright project file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importProjectFile(file); }} />
       <input ref={videoFileInputRef} hidden type="file" accept="video/*,.mp4,.m4v,.mov,.webm,.ogv,.avi" aria-label="Choose a local video file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importVideoFile(file); }} />
       <input ref={audioFileInputRef} hidden type="file" accept="audio/*,.aac,.aif,.aiff,.flac,.m4a,.mp3,.oga,.ogg,.opus,.wav,.weba" aria-label="Choose a local audio file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importAudioFile(file); }} />
+      <input ref={imageFileInputRef} hidden type="file" accept="image/*,.avif,.bmp,.gif,.heic,.heif,.jpeg,.jpg,.png,.tif,.tiff,.webp" aria-label="Choose a local image file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void importImageFile(file); }} />
       {showCreate && <CreateProjectDialog onClose={() => setShowCreate(false)} onCreate={createNewProject} />}
       {recoveryProjectId && <RecoveryDialog projectName={projects.find((project) => project.id === recoveryProjectId)?.name ?? 'Project'} points={recoveryPoints} restoring={isRestoringRecovery} onRestore={(point) => { void restoreRecoveryPoint(point); }} onClose={() => { if (!isRestoringRecovery) setRecoveryProjectId(null); }} />}
       {showSettings && <SettingsDialog
@@ -1195,7 +1562,12 @@ export default function App() {
         onRenameProject={(name) => { if (activeProject && updateProject(activeProject.id, { name })) notify('Project renamed.'); }}
         onApplyCanvas={applySettingsCanvas}
         onApplyFrameRate={applySettingsFrameRate}
-        onClearCache={() => window.dispatchEvent(new Event('clipwright:clear-waveform-cache'))}
+        storageRoot={persistentStorageRoot}
+        storageIssue={persistentStorageIssue}
+        onOpenStorageFolder={() => { void openPersistentDataFolder(); }}
+        onCreateBackup={() => { void createProjectBackup(); }}
+        onRestoreBackup={() => { void restoreProjectBackup(); }}
+        onClearCache={() => { void clearPersistentCache(); }}
         onReset={() => { updatePreferences(() => structuredClone(DEFAULT_EDITOR_PREFERENCES)); setTheme('dark'); }}
         onClose={() => setShowSettings(false)}
       />}
@@ -1285,8 +1657,9 @@ function useDialogFocusTrap<T extends HTMLElement>(initialFocus?: () => HTMLElem
   return containerRef;
 }
 
-function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string, ratio: AspectRatio, fps: Project['frameRate'], dimensions: { width: number; height: number }) => void }) {
+function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string, ratio: AspectRatio, fps: Project['frameRate'], dimensions: { width: number; height: number }) => void | Promise<void> }) {
   const [name, setName] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
   const [ratio, setRatio] = useState<AspectRatio | 'custom'>('16:9');
   const [width, setWidth] = useState('1920');
   const [height, setHeight] = useState('1080');
@@ -1307,11 +1680,14 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
     <section ref={dialogRef} tabIndex={-1} className="dialog create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title">
       <div className="dialog-head"><div className="dialog-icon"><FilePlus2 size={17} /></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={17} /></button></div>
       <div className="eyebrow">NEW WORKSPACE</div><h2 id="create-title">Create a project</h2><p className="dialog-copy">Set up your sequence. You can change these settings later.</p>
-      <form onSubmit={(event) => {
+      <form onSubmit={async (event) => {
         event.preventDefault();
+        if (isCreating) return;
         const numericWidth = Number(width);
         const numericHeight = Number(height);
-        onCreate(name, aspectRatioOf(numericWidth, numericHeight) as AspectRatio, fps, { width: numericWidth, height: numericHeight });
+        setIsCreating(true);
+        try { await onCreate(name, aspectRatioOf(numericWidth, numericHeight) as AspectRatio, fps, { width: numericWidth, height: numericHeight }); }
+        finally { setIsCreating(false); }
       }}>
         <label className="field-label" htmlFor="project-name">Project name</label><input ref={fieldRef} id="project-name" className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Summer campaign" maxLength={80} required />
         <div className="form-row"><div><label className="field-label" htmlFor="aspect-ratio">Aspect ratio</label><select id="aspect-ratio" className="select-input" value={ratio} onChange={(event) => {
@@ -1325,8 +1701,8 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
           if (presets[next]) { setWidth(String(presets[next].width)); setHeight(String(presets[next].height)); }
         }}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>4:5</option><option>5:4</option><option>21:9</option><option value="custom">Custom</option></select></div><div><label className="field-label" htmlFor="frame-rate">Frame rate</label><select id="frame-rate" className="select-input" value={fps} onChange={(event) => setFps(Number(event.target.value) as Project['frameRate'])}>{frameRateOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div></div>
         <div className="form-row"><div><label className="field-label" htmlFor="project-canvas-width">Canvas width (px)</label><input id="project-canvas-width" className="text-input" type="number" min="16" max="16384" step="1" value={width} onChange={(event) => setWidth(event.target.value)} required /></div><div><label className="field-label" htmlFor="project-canvas-height">Canvas height (px)</label><input id="project-canvas-height" className="text-input" type="number" min="16" max="16384" step="1" value={height} onChange={(event) => setHeight(event.target.value)} required /></div></div>
-        <div className="local-note"><HardDrive size={14} /><span>Project details are saved locally in this browser profile. No media is copied.</span></div>
-        <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button-primary"><Plus size={15} />Create project</button></div>
+        <div className="local-note"><HardDrive size={14} /><span>{window.clipwright?.library ? 'Project details autosave to the local ClipWright library. Media is copied only when you choose Managed copy during import.' : 'Project details stay in this browser profile; media sources are session-only until you reopen them.'}</span></div>
+        <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={onClose} disabled={isCreating}>Cancel</button><button type="submit" className="button button-primary" disabled={isCreating}><Plus size={15} />{isCreating ? 'Creating…' : 'Create project'}</button></div>
       </form>
     </section>
   </div>;
@@ -1334,7 +1710,7 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
 
 function EditorFoundation({
   project, projectDocument, exportDialogOpen, onExportDialogOpenChange, preferences, onPreferenceChange, sessionSources, selectedMediaKey, isReadingMedia, focusMode, onToggleFocusMode,
-  onImportVideo, onImportAudio, onRelinkVideo, onRelinkAudio, onSelectMedia, onToggleTrackState, onApplyTimelineEdit,
+  onImportVideo, onImportAudio, onImportImage, onRelinkVideo, onRelinkAudio, onRelinkImage, onSelectMedia, onRevealMedia, mediaImportMode, onMediaImportModeChange, hasPersistentLibrary, onToggleTrackState, onApplyTimelineEdit,
   canUndo, canRedo, onUndo, onRedo, onPlaybackError, onNotify,
 }: {
   project: Project | null;
@@ -1350,9 +1726,15 @@ function EditorFoundation({
   onToggleFocusMode: () => void;
   onImportVideo: () => void;
   onImportAudio: () => void;
+  onImportImage: () => void;
   onRelinkVideo: (assetId: string) => void;
   onRelinkAudio: (assetId: string) => void;
+  onRelinkImage: (assetId: string) => void;
   onSelectMedia: (key: string) => void;
+  onRevealMedia: (assetId: string) => void;
+  mediaImportMode: 'managed' | 'linked';
+  onMediaImportModeChange: (mode: 'managed' | 'linked') => void;
+  hasPersistentLibrary: boolean;
   onToggleTrackState: (trackId: string, field: 'muted' | 'locked') => void;
   onApplyTimelineEdit: (edit: (document: ProjectDocument) => ProjectDocument, message: string) => boolean;
   canUndo: boolean;
@@ -2099,9 +2481,17 @@ function EditorFoundation({
 
     try {
       const sourceBlobs = new Map<string, Blob>();
+      const exportSourceIds = new Set(activeSequence.tracks.flatMap((track) => track.clips.map((clip) => clip.sourceId)));
       for (const asset of activeProjectDocument.assets) {
+        if (!exportSourceIds.has(asset.id)) continue;
         const source = activeSessionSources[mediaKey(activeProjectDocument.id, asset.id)];
-        if (source) sourceBlobs.set(asset.id, source.blob);
+        if (!source) continue;
+        if (source.blob) sourceBlobs.set(asset.id, source.blob);
+        else {
+          const response = await fetch(source.url);
+          if (!response.ok) throw new Error(`Could not read “${asset.name}” for export; relink the media and try again.`);
+          sourceBlobs.set(asset.id, await response.blob());
+        }
       }
       result = await exportTimelineProject({
         projectSnapshot: activeProjectDocument,
@@ -2760,15 +3150,18 @@ function EditorFoundation({
               <button className="icon-button small" type="button" title={mediaPanelCollapsed ? 'Expand media panel' : 'Collapse media panel'} aria-label={mediaPanelCollapsed ? 'Expand media panel' : 'Collapse media panel'} aria-expanded={!mediaPanelCollapsed} onClick={() => setMediaPanelCollapsed((collapsed) => !collapsed)}>{mediaPanelCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}</button>
               {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button>}
               {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local audio file" aria-label="Import a local audio file" onClick={onImportAudio} disabled={isReadingMedia || !project}><Volume2 size={14} /></button>}
+              {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local image" aria-label="Import a local image" onClick={onImportImage} disabled={isReadingMedia || !project}><ImageIcon size={14} /></button>}
             </div>
           </div>
           {!mediaPanelCollapsed && <>
+            <label className="media-storage-mode"><span>New media storage</span><select className="select-input" aria-label="New media storage mode" value={mediaImportMode} onChange={(event) => onMediaImportModeChange(event.target.value as 'managed' | 'linked')}><option value="managed" disabled={!hasPersistentLibrary}>Managed copy · stays with project</option><option value="linked">{hasPersistentLibrary ? 'Link external original' : 'Session only · browser'}</option></select></label>
             {isReadingMedia && <div className="media-reading-status" role="status" aria-live="polite">Reading local media metadata…</div>}
             {assets.length ? <div className="media-asset-list" aria-label="Media assets">
               {assets.map((asset) => {
                 const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
                 const available = Boolean(sessionSources[key]);
                 const supported = Boolean(asset.streams[asset.kind === 'audio' ? 'audio' : 'video']);
+                const storageLabel = asset.pathKind === 'project-relative' ? 'Managed copy' : asset.pathKind === 'absolute' ? 'Linked original' : 'Session only';
                 return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
                   <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => onSelectMedia(key)} disabled={!projectDocument} title={asset.name} draggable={supported} onDragStart={(event) => {
                     mediaDragSourceRef.current = asset.id;
@@ -2776,19 +3169,22 @@ function EditorFoundation({
                     event.dataTransfer.setData('application/x-clipwright-source', asset.id);
                     event.dataTransfer.setData('text/plain', asset.id);
                   }} onDragEnd={() => { mediaDragSourceRef.current = null; setDropPreview(null); }}>
-                    {asset.kind === 'audio' ? <Volume2 size={15} /> : <Film size={15} />}<span className="media-asset-copy"><strong>{asset.name}</strong><small>{supported ? (!available ? 'Relink required' : `Drag to a ${asset.kind} track`) : `${asset.kind} · timeline media`}</small></span>
+                    {asset.kind === 'image' && available ? <img className="media-asset-thumbnail" src={sessionSources[key]?.url} alt="" /> : asset.kind === 'audio' ? <Volume2 size={15} /> : asset.kind === 'image' ? <ImageIcon size={15} /> : <Film size={15} />}<span className="media-asset-copy"><strong>{asset.name}</strong><small>{storageLabel} · {asset.kind === 'image' ? (!available ? 'Relink required' : `${asset.imageDimensions?.width ?? 'Image'} × ${asset.imageDimensions?.height ?? ''} · library item`) : supported ? (!available ? 'Relink required' : `Drag to a ${asset.kind} track`) : `${asset.kind} · library item`}</small></span>
                   </button>
+                  {asset.pathKind === 'project-relative' && available && <button className="icon-button small media-reveal" type="button" aria-label={`Reveal ${asset.name} in File Explorer`} title="Reveal managed copy in File Explorer" onClick={() => onRevealMedia(asset.id)}><FolderOpen size={14} /></button>}
                   {asset.kind === 'video' && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
                   {asset.kind === 'audio' && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkAudio(asset.id)} disabled={isReadingMedia}>Relink</button>}
+                  {asset.kind === 'image' && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkImage(asset.id)} disabled={isReadingMedia}>Relink</button>}
                 </div>;
               })}
               <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
               <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportAudio} disabled={isReadingMedia || !project}><Plus size={13} />Add audio</button>
+              <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportImage} disabled={isReadingMedia || !project}><Plus size={13} />Add image</button>
             </div> : <div className="media-empty">
-              <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose local video or audio files; originals remain untouched.</span><div className="media-empty-actions"><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button><button className="button button-secondary button-small" onClick={onImportAudio} disabled={isReadingMedia || !project}><Plus size={14} />Import audio</button></div>
+              <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose local video, audio, or image files. Original files are not modified.</span><div className="media-empty-actions"><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button><button className="button button-secondary button-small" onClick={onImportAudio} disabled={isReadingMedia || !project}><Plus size={14} />Import audio</button><button className="button button-secondary button-small" onClick={onImportImage} disabled={isReadingMedia || !project}><Plus size={14} />Import image</button></div>
             </div>}
             {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
-            <div className="panel-footnote"><HardDrive size={12} />Original files stay in place; relink after reload</div>
+            <div className="panel-footnote"><HardDrive size={12} />Managed media is copied into this project; linked originals stay in place.</div>
           </>}
         </aside>
         <div className="panel-resize-handle" role="separator" aria-label="Resize Project media panel" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={420} aria-valuenow={mediaPanelWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize(event, 'media')} onPointerMove={movePanelResize} onPointerUp={endPanelResize} onPointerCancel={endPanelResize} onKeyDown={(event) => handlePanelResizeKey(event, 'media')}><span /></div>
@@ -3143,7 +3539,7 @@ function ExportDialog({
 
 function SettingsDialog({
   initialTab, theme, onTheme, preferences, onPreferencesChange, project, projectDocument, onRenameProject,
-  onApplyCanvas, onApplyFrameRate, onClearCache, onReset, onClose,
+  onApplyCanvas, onApplyFrameRate, storageRoot, storageIssue, onOpenStorageFolder, onCreateBackup, onRestoreBackup, onClearCache, onReset, onClose,
 }: {
   initialTab: 'project' | 'editor' | 'audio' | 'export' | 'storage' | 'appearance' | 'shortcuts';
   theme: 'dark' | 'light';
@@ -3155,6 +3551,11 @@ function SettingsDialog({
   onRenameProject: (name: string) => void;
   onApplyCanvas: (width: number, height: number, fit: NonNullable<Sequence['canvasFit']>, background: string) => void;
   onApplyFrameRate: (value: number) => void;
+  storageRoot: string | null;
+  storageIssue: string | null;
+  onOpenStorageFolder: () => void;
+  onCreateBackup: () => void;
+  onRestoreBackup: () => void;
   onClearCache: () => void;
   onReset: () => void;
   onClose: () => void;
@@ -3220,11 +3621,12 @@ function SettingsDialog({
             <div className="settings-info-row"><strong>Default save folder</strong><span>{window.clipwright?.exportFiles ? 'Native folder can be selected in the export dialog; the latest choice is remembered on this device.' : 'Browser download location, managed by browser settings.'}</span></div>
           </section>}
           {tab === 'storage' && <section id="settings-panel-storage" role="tabpanel" aria-labelledby="settings-tab-storage" className="settings-section">
-            <h3>Autosave & storage</h3><p>Project data stays on this device. Original media remains in its source location and is never copied into project documents.</p>
-            <label className="settings-select-row"><span><strong>Autosave after inactivity</strong><small>Debounce delay after an edit before local and linked-project saves.</small></span><select className="select-input" value={preferences.storage.autosaveIntervalSeconds} onChange={(event) => onPreferencesChange((current) => ({ ...current, storage: { ...current.storage, autosaveIntervalSeconds: Number(event.target.value) } }))}><option value={1}>1 second</option><option value={2}>2 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option></select></label>
-            <div className="settings-info-row"><strong>Project storage</strong><span>{window.clipwright?.projectFiles ? 'Linked .cwproject files save to the location you choose; workspace preferences are stored on this device.' : 'Projects and workspace preferences are stored in this browser profile.'}</span></div>
-            <div className="settings-info-row"><strong>Original media</strong><span>Referenced by path/session only; source files are not moved or deleted.</span></div>
-            <div className="settings-info-row"><strong>Temporary cache</strong><span>Clear in-memory waveform peaks only. This will not clear projects or media.</span><button className="button button-secondary button-small" type="button" onClick={onClearCache}>Clear waveform cache</button></div>
+            <h3>Autosave & storage</h3><p>Project manifests, managed media, settings, and caches stay in ClipWright’s per-user data directory. Managed copies do not modify the originals; linked media remains in its chosen location.</p>
+            <label className="settings-select-row"><span><strong>Autosave after inactivity</strong><small>Debounce delay for edits before the validated project manifest is atomically saved.</small></span><select className="select-input" value={preferences.storage.autosaveIntervalSeconds} onChange={(event) => onPreferencesChange((current) => ({ ...current, storage: { ...current.storage, autosaveIntervalSeconds: Number(event.target.value) } }))}><option value={1}>1 second</option><option value={2}>2 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option></select></label>
+            <div className="settings-info-row"><strong>ClipWright data folder</strong><span>{storageRoot ?? (window.clipwright?.library ? 'Locating per-user app data…' : 'Browser build · local browser profile')}</span>{window.clipwright?.library && <button className="button button-secondary button-small" type="button" onClick={onOpenStorageFolder} disabled={!storageRoot}><FolderOpen size={13} />Open folder</button>}</div>
+            {storageIssue && <div className="storage-recovery-warning" role="alert"><strong>Project library needs attention</strong><span>{storageIssue} Existing project files were not overwritten.</span></div>}
+            <div className="settings-info-row"><strong>Project backups</strong><span>Backups contain the manifest and managed media. Linked media is listed separately unless you choose to collect it.</span><div className="storage-action-row"><button className="button button-secondary button-small" type="button" onClick={onCreateBackup} disabled={!project || !window.clipwright?.library}>Create project backup</button><button className="button button-secondary button-small" type="button" onClick={onRestoreBackup} disabled={!window.clipwright?.library}>Restore backup</button></div></div>
+            <div className="settings-info-row"><strong>Temporary cache</strong><span>Cache cleanup is restricted to temporary cache content; projects, managed media, and completed exports are kept.</span><button className="button button-secondary button-small" type="button" onClick={onClearCache}>Clear temporary cache</button></div>
           </section>}
           {tab === 'appearance' && <section id="settings-panel-appearance" role="tabpanel" aria-labelledby="settings-tab-appearance" className="settings-section">
             <h3>Appearance</h3><p>These options apply immediately and are stored in this browser profile.</p>

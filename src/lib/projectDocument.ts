@@ -24,6 +24,7 @@ export type MediaAsset = {
   streams: { video?: StreamInfo; audio?: StreamInfo };
   fileSizeBytes?: number;
   fingerprint?: string;
+  imageDimensions?: { width: number; height: number };
 };
 export type TimelineClip = {
   id: string;
@@ -215,6 +216,8 @@ export function validateProjectDocument(value: unknown): ValidationResult {
     if (asset.kind === 'audio' && !asset.streams.audio) errors.push(`${path} audio assets must include an audio stream.`);
     if (asset.fileSizeBytes !== undefined && !isInteger(asset.fileSizeBytes)) errors.push(`${path}.fileSizeBytes must be a non-negative integer.`);
     if (asset.fingerprint !== undefined && !isString(asset.fingerprint)) errors.push(`${path}.fingerprint must be a non-empty string.`);
+    if (asset.imageDimensions !== undefined && (!isObject(asset.imageDimensions) || !isInteger(asset.imageDimensions.width, 1) || asset.imageDimensions.width > 16384 || !isInteger(asset.imageDimensions.height, 1) || asset.imageDimensions.height > 16384)) errors.push(`${path}.imageDimensions must contain whole pixel dimensions from 1 to 16384.`);
+    if (asset.imageDimensions !== undefined && asset.kind !== 'image') errors.push(`${path}.imageDimensions is only valid for image assets.`);
   });
 
   sequences.forEach((sequence, index) => {

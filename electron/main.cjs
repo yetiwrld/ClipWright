@@ -11,6 +11,8 @@ const {
   writeProjectFile,
 } = require('./projectFiles.cjs');
 const { writeExportFile } = require('./exportFiles.cjs');
+const persistentStorage = require('./persistentStorage.cjs');
+const { MEDIA_HOST, MEDIA_SCHEME, clearMediaUrls, mediaProtocolHandler, registerMediaUrl } = require('./mediaProtocol.cjs');
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'clipwright';
@@ -47,17 +49,18 @@ const CONTENT_SECURITY_POLICY = [
   "form-action 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  `img-src 'self' data: blob: ${MEDIA_SCHEME}:`,
   "font-src 'self' data:",
-  "media-src 'self' blob:",
-  "connect-src 'self'",
+  `media-src 'self' blob: ${MEDIA_SCHEME}:`,
+  `connect-src 'self' ${MEDIA_SCHEME}:`,
+
   "worker-src 'self' blob:",
 ].join('; ');
 
-protocol.registerSchemesAsPrivileged([{
-  scheme: APP_SCHEME,
-  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
-}]);
+protocol.registerSchemesAsPrivileged([
+  { scheme: APP_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
+  { scheme: MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+]);
 
 function getDevServerUrl() {
   const value = process.env.CLIPWRIGHT_RENDERER_URL;
@@ -103,6 +106,22 @@ async function handleAppRequest(request) {
 const projectFileHandles = new Map();
 const exportFolderHandles = new Map();
 const exportFileHandles = new Map();
+const persistentProjectHashes = new Map();
+const mediaUrlHandles = new Map();
+
+function storageRoot() {
+  return persistentStorage.applicationDataRoot(app.getPath('userData'));
+}
+
+function persistentProjectKey(projectId) {
+  return path.join(persistentStorage.projectDirectory(storageRoot(), projectId), persistentStorage.MANIFEST_NAME);
+}
+
+async function refreshPersistentProjectHashes() {
+  const listing = await persistentStorage.listLibraryProjects(storageRoot());
+  for (const project of listing.projects) persistentProjectHashes.set(persistentProjectKey(project.documentId), project.contentHash);
+  return listing;
+}
 
 function assertTrustedIpcSender(event) {
   if (event.senderFrame !== event.sender.mainFrame || !isTrustedRendererUrl(event.senderFrame.url, { devServerOrigin, scheme: APP_SCHEME, host: APP_HOST })) {
@@ -165,6 +184,116 @@ function registerIpcHandlers() {
       platform: process.platform,
       packaged: app.isPackaged,
     };
+  });
+
+  ipcMain.handle('library:initialize', async (event) => {
+    assertTrustedIpcSender(event);
+    const layout = await persistentStorage.ensureStorageLayout(storageRoot());
+    const listing = await refreshPersistentProjectHashes();
+    return {
+      root: layout.root,
+      directories: layout.directories,
+      projects: listing.projects.map(({ contents, documentId, contentHash, fileName }) => ({ contents, documentId, contentHash, fileName })),
+      issues: listing.issues,
+    };
+  });
+
+  ipcMain.handle('library:save-project', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (!payload || typeof payload.contents !== 'string') throw new Error('Project contents are required.');
+    const document = parseProjectEnvelope(payload.contents, { allowLegacy: true });
+    const key = persistentProjectKey(document.id);
+    const result = await persistentStorage.saveLibraryProject({ root: storageRoot(), contents: payload.contents, expectedCurrentHash: persistentProjectHashes.get(key) });
+    persistentProjectHashes.set(key, result.contentHash);
+    const { filePath, folder, ...publicResult } = result;
+    return publicResult;
+  });
+
+  ipcMain.handle('library:import-media', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (!payload || typeof payload.filePath !== 'string') throw new Error('A selected media file is required.');
+    const imported = await persistentStorage.importMedia({ root: storageRoot(), projectId: payload.projectId, assetId: payload.assetId, sourcePath: payload.filePath, mode: payload.mode });
+    const resolved = await persistentStorage.resolveAssetPath({ root: storageRoot(), projectId: payload.projectId, asset: imported });
+    if (!resolved.available) throw new Error('The imported media copy could not be opened for verification.');
+    return { ...imported, mediaUrl: registerMediaUrl(resolved.filePath, event.sender.id, mediaUrlHandles) };
+  });
+
+  ipcMain.handle('library:resolve-media', async (event, projectId) => {
+    assertTrustedIpcSender(event);
+    const manifest = await readProjectFile(path.join(persistentStorage.projectDirectory(storageRoot(), projectId), persistentStorage.MANIFEST_NAME));
+    const document = parseProjectEnvelope(manifest.contents, { allowLegacy: true, expectedId: projectId });
+    const results = [];
+    for (const asset of document.assets ?? []) {
+      const resolved = await persistentStorage.resolveAssetPath({ root: storageRoot(), projectId, asset });
+      results.push(resolved.available
+        ? { assetId: asset.id, available: true, mediaUrl: registerMediaUrl(resolved.filePath, event.sender.id, mediaUrlHandles), sizeBytes: resolved.sizeBytes }
+        : { assetId: asset.id, available: false, reason: resolved.reason });
+    }
+    return results;
+  });
+
+  ipcMain.handle('library:reveal-media', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    const manifest = await readProjectFile(path.join(persistentStorage.projectDirectory(storageRoot(), payload?.projectId), persistentStorage.MANIFEST_NAME));
+    const document = parseProjectEnvelope(manifest.contents, { allowLegacy: true, expectedId: payload.projectId });
+    const asset = document.assets.find((candidate) => candidate.id === payload.assetId);
+    if (!asset) throw new Error('The project does not contain that media asset.');
+    const resolved = await persistentStorage.resolveAssetPath({ root: storageRoot(), projectId: payload.projectId, asset });
+    if (!resolved.available) throw new Error(resolved.reason);
+    shell.showItemInFolder(resolved.filePath);
+    return { opened: true };
+  });
+
+  ipcMain.handle('library:open-data-folder', async (event) => {
+    assertTrustedIpcSender(event);
+    const layout = await persistentStorage.ensureStorageLayout(storageRoot());
+    const error = await shell.openPath(layout.root);
+    if (error) throw new Error(error);
+    return { opened: true, root: layout.root };
+  });
+
+  ipcMain.handle('library:clear-cache', async (event) => {
+    assertTrustedIpcSender(event);
+    return persistentStorage.clearCache(storageRoot());
+  });
+
+  ipcMain.handle('library:clone-project', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (!payload || typeof payload.sourceProjectId !== 'string' || typeof payload.contents !== 'string') throw new Error('Project copy data is required.');
+    const result = await persistentStorage.cloneLibraryProject({ root: storageRoot(), sourceProjectId: payload.sourceProjectId, contents: payload.contents });
+    persistentProjectHashes.set(persistentProjectKey(result.projectId), result.contentHash);
+    return result;
+  });
+
+  ipcMain.handle('library:archive-project', async (event, projectId) => {
+    assertTrustedIpcSender(event);
+    return persistentStorage.archiveLibraryProject({ root: storageRoot(), projectId });
+  });
+
+  ipcMain.handle('library:create-backup', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    const projectId = payload?.projectId;
+    const result = await dialog.showOpenDialog(getWindowForSender(event), { title: 'Choose project backup destination', properties: ['openDirectory', 'createDirectory'] });
+    if (result.canceled || !result.filePaths[0]) return { canceled: true };
+    const backup = await persistentStorage.createProjectBackup({ root: storageRoot(), projectId, destinationDirectory: result.filePaths[0], includeLinked: payload.includeLinked === true });
+    return { canceled: false, backupPath: backup.backupPath, externalNotCollected: backup.externalNotCollected };
+  });
+
+  ipcMain.handle('library:restore-backup', async (event) => {
+    assertTrustedIpcSender(event);
+    const result = await dialog.showOpenDialog(getWindowForSender(event), { title: 'Choose a ClipWright project backup folder', properties: ['openDirectory'] });
+    if (result.canceled || !result.filePaths[0]) return { canceled: true };
+    let restored;
+    try { restored = await persistentStorage.restoreProjectBackup({ backupDirectory: result.filePaths[0], destinationRoot: storageRoot() }); }
+    catch (error) {
+      if (!/already exists/.test(error instanceof Error ? error.message : '')) throw error;
+      restored = await persistentStorage.restoreProjectBackup({ backupDirectory: result.filePaths[0], destinationRoot: storageRoot(), newProjectId: crypto.randomUUID() });
+    }
+    const parsed = parseProjectEnvelope(restored.contents, { allowLegacy: true, expectedId: restored.projectId });
+    const key = persistentProjectKey(parsed.id);
+    const saved = await persistentStorage.saveLibraryProject({ root: storageRoot(), contents: restored.contents });
+    persistentProjectHashes.set(key, saved.contentHash);
+    return { canceled: false, contents: restored.contents, documentId: parsed.id };
   });
 
   ipcMain.handle('export-files:get-default-folder', async (event) => {
@@ -451,6 +580,7 @@ function createWindow() {
     for (const [handle, file] of exportFileHandles) {
       if (file.webContentsId === window.webContents.id) exportFileHandles.delete(handle);
     }
+    clearMediaUrls(window.webContents.id, mediaUrlHandles);
   });
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (smokeTest && isMainFrame) {
@@ -482,6 +612,8 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     if (!devServerUrl) await protocol.handle(APP_SCHEME, handleAppRequest);
+    await protocol.handle(MEDIA_SCHEME, mediaProtocolHandler(mediaUrlHandles));
+    await persistentStorage.ensureStorageLayout(storageRoot());
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     registerIpcHandlers();
     createWindow();

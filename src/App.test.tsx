@@ -328,7 +328,7 @@ describe('ClipWright foundation UI', () => {
     const file = new File(['local test bytes'], 'sample.mp4', { type: 'video/mp4' });
     fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [file] } });
 
-    expect(await screen.findByText(/Metadata read · sample\.mp4 · 1280 × 720 · 8\.13 s/)).toBeTruthy();
+    expect(await screen.findByText(/Session-only video · sample\.mp4 · 1280 × 720 · 8\.13 s/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Play timeline' }).hasAttribute('disabled')).toBe(true);
     await waitFor(() => expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).toContain('browser-session'));
     const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
@@ -347,12 +347,12 @@ describe('ClipWright foundation UI', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:clipwright-local-video');
     const { container } = render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Open Local source test' }));
-    expect(await screen.findByText('Relink required')).toBeTruthy();
+    expect(await screen.findByText(/Session only · Relink required/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Relink' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Relink' }));
-    const relinkedFile = new File(['same source'], 'sample-relinked.mp4', { type: 'video/mp4' });
+    const relinkedFile = new File(['local test bytes'], 'sample-relinked.mp4', { type: 'video/mp4' });
     fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [relinkedFile] } });
-    expect(await screen.findByText(/Metadata read · sample-relinked\.mp4 · 1280 × 720 · 8\.13 s/)).toBeTruthy();
+    expect(await screen.findByText(/Session-only video · sample-relinked\.mp4 · 1280 × 720 · 8\.13 s/)).toBeTruthy();
     const relinkedDocument = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
     expect(relinkedDocument[0].assets).toHaveLength(1);
     expect(relinkedDocument[0].assets[0].sourcePath).toBe('sample-relinked.mp4');
@@ -534,7 +534,7 @@ describe('ClipWright foundation UI', () => {
     const audio = new File(['audio bytes'], 'voice.wav', { type: 'audio/wav' });
     fireEvent.change(screen.getByLabelText('Choose a local audio file'), { target: { files: [audio] } });
 
-    expect(await screen.findByText('Audio metadata read · voice.wav · 10.00 s.')).toBeTruthy();
+    expect(await screen.findByText('Session-only audio · voice.wav · 10.00 s.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Add at playhead' }));
     const timelineAudio = await screen.findByLabelText('Timeline audio: voice.wav') as HTMLAudioElement;
     expect(timelineAudio.src).toBe('blob:clipwright-local-audio');

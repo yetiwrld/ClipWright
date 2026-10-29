@@ -20,5 +20,11 @@ describe('local media import preflight', () => {
   it('allows browser-generic MIME types when a recognized extension is present', () => {
     expect(prepareLocalMediaFile(localFile('voice.m4a'), 'audio')).toBe('voice.m4a');
     expect(prepareLocalMediaFile(localFile('camera.mov'), 'video')).toBe('camera.mov');
+    expect(prepareLocalMediaFile(localFile('夏日照片.webp'), 'image')).toBe('夏日照片.webp');
+  });
+
+  it('rejects media-kind mismatches for image assets', () => {
+    expect(() => prepareLocalMediaFile(localFile('song.mp3', 'audio/mpeg'), 'image')).toThrow('not identified as an image');
+    expect(() => prepareLocalMediaFile(localFile('readme.txt', 'text/plain'), 'image')).toThrow('Choose an image file');
   });
 });
