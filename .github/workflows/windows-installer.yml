@@ -1,0 +1,261 @@
+name: Windows desktop installer
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  windows-installer:
+    name: Build and smoke-test unsigned Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run application tests
+        run: npm test
+
+      - name: Test desktop security helpers
+        run: npm run test:desktop
+
+      - name: Build Windows NSIS installer
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP 'windows-installer-build.log'
+          npm run desktop:dist:win *>&1 | Tee-Object -FilePath $logPath
+          $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -ne 0) {
+            $tail = (Get-Content $logPath -Tail 50) -join "`n"
+            $escaped = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows installer build failed::$escaped"
+            exit $buildExitCode
+          }
+
+      - name: Smoke-test the packaged renderer and preload bridge
+        id: packaged-smoke
+        shell: pwsh
+        run: |
+          $env:CLIPWRIGHT_SMOKE_TEST = '1'
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'clipwright-production-export-artifacts'
+          $env:CLIPWRIGHT_SMOKE_ARTIFACT_DIR = $artifactDirectory
+          $reportPath = Join-Path $env:RUNNER_TEMP 'deterministic-export-smoke.json'
+          $env:CLIPWRIGHT_SMOKE_REPORT_PATH = $reportPath
+          $appPath = Join-Path 'release\win-unpacked' 'ClipWright Studio.exe'
+          if (-not (Test-Path $appPath)) {
+            throw "Packaged application executable not found: $appPath"
+          }
+          $smokeStdoutPath = Join-Path $env:RUNNER_TEMP 'packaged-smoke-stdout.log'
+          $smokeStderrPath = Join-Path $env:RUNNER_TEMP 'packaged-smoke-stderr.log'
+          $process = Start-Process -FilePath $appPath -PassThru -Wait -RedirectStandardOutput $smokeStdoutPath -RedirectStandardError $smokeStderrPath
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $reportPath) {
+              $failed = Get-Content -Raw $reportPath | ConvertFrom-Json
+              $frame = $failed.frameIdentity
+              $firstMismatch = $null
+              if ($frame.firstIncorrectFrame) {
+                $firstMismatch = [ordered]@{
+                  outputFrame = $frame.firstIncorrectFrame.outputFrame
+                  timestampErrorSeconds = $frame.firstIncorrectFrame.timestampErrorSeconds
+                  expected = $frame.firstIncorrectFrame.expected
+                  actual = $frame.firstIncorrectFrame.actual
+                }
+              }
+              $mismatchFrames = @($frame.mismatches | ForEach-Object { $_.outputFrame })
+              $actual = [ordered]@{
+                videoSyncFlashFrames = $frame.actual.videoSyncFlashFrames
+                audioOnsetMatches = $frame.actual.audioOnsetMatches
+                avSyncChecks = $frame.actual.avSyncChecks
+              }
+              $short = [ordered]@{
+                audioDurationSmokePass = $failed.audioDurationSmokePass
+                frameIdentityPass = $frame.pass
+                stage = $frame.stage
+                error = $frame.error
+                requiredMp4Coverage = $frame.requiredMp4Coverage
+                expectedAudioPulseFrameIndexes = $frame.expected.expectedAudioPulseFrameIndexes
+                expectedAudioPulseOnsetsSeconds = $frame.expected.expectedAudioPulseOnsetsSeconds
+                expectedFlashFrameIndexes = $frame.expected.expectedFlashFrameIndexes
+                counts = $frame.counts
+                mismatchCount = $frame.mismatchCount
+                mismatchFrames = $mismatchFrames
+                firstMismatch = $firstMismatch
+                actual = $actual
+              }
+              $details = ($short | ConvertTo-Json -Depth 8 -Compress).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Packaged smoke diagnostics::$details"
+            }
+            throw "Packaged application smoke test failed with exit code $($process.ExitCode)."
+          }
+          if (-not (Test-Path $reportPath)) {
+            throw 'Packaged application did not write the required WebM/MP4 production-export measurements.'
+          }
+          $report = Get-Content -Raw $reportPath | ConvertFrom-Json
+          if (-not $report.pass) {
+            throw "Packaged production-export validation failed: $($report | ConvertTo-Json -Depth 10 -Compress)"
+          }
+          foreach ($requiredFile in @('source-A.webm', 'source-B.webm', 'saved-project.json', 'fixture.json', 'timeline-export.webm', 'timeline-export.mp4', 'timeline-video-only.mp4', 'timeline-custom.mp4', 'timeline-custom.webm')) {
+            if (-not (Test-Path (Join-Path $artifactDirectory $requiredFile))) { throw "Required production-export artifact missing: $requiredFile" }
+          }
+          @"
+          ## Packaged Windows production timeline export
+          - Production path: a serialized and reparsed saved project was exported by `exportTimelineProject` in the packaged Electron renderer using two generated VP9/Opus sources; offline and gap cases are included.
+          - Internal frame pipeline: requested $($report.frameIdentity.counts.requested), rendered $($report.frameIdentity.counts.rendered), submitted $($report.frameIdentity.counts.submitted), encoded $($report.frameIdentity.counts.encoded), WebM video packets $($report.frameIdentity.counts.outputVideoPackets); built-in decoded sample probes passed: $($report.frameIdentity.actual.decodedSampleFrames); independent FFmpeg full decode below.
+          - Independent FFmpeg/ffprobe checks compare all video frames, PTS, identity pixels, all seven audio pulse onsets, A/V sync, and track/container durations with explicit tolerances.
+          - Video tolerance: $($report.frameIdentity.expected.videoTimestampToleranceSeconds)s; audio duration: $($report.frameIdentity.expected.audioDurationToleranceSeconds)s; A/V onset: $($report.frameIdentity.expected.audioOnsetToleranceSeconds)s.
+          - Required production MP4/WebM coverage (real encoders and muxers; no codec-capability skip): $($report.frameIdentity.mp4Production | ConvertTo-Json -Compress -Depth 7).
+          - MP4 cancellation cleanup followed by a successful portrait H.264/AAC retry: $($report.frameIdentity.mp4CancellationThenRetryPassed).
+          - Unsupported odd-canvas MP4 config was rejected through the production path without resize/fallback: $($report.frameIdentity.requiredMp4Coverage.unsupportedConfigurationRejected); evidence: $($report.frameIdentity.actual.unsupportedMp4Configuration | ConvertTo-Json -Compress -Depth 5).
+          - Runtime: Electron $($report.runtime.electronVersion), Chromium $($report.runtime.chromiumVersion), Node $($report.runtime.nodeVersion); WebCodecs backend mode exposed by API: $($report.runtime.actualHardwareSoftwareBackend).
+          - WebCodecs config (hardwareAcceleration is a preference, not hardware proof): WebM video $($report.frameIdentity.actual.encoderConfiguration.video | ConvertTo-Json -Compress -Depth 5); audio $($report.frameIdentity.actual.encoderConfiguration.audio | ConvertTo-Json -Compress -Depth 5).
+          - Synthetic-only artifacts: generated source files, exact saved-project JSON, fixture manifest, actual production WebM/MP4 files, smoke report, and independent FFmpeg/ffprobe report.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+          $videoDuration = ([double]$report.frameIdentity.actual.videoDurationSeconds).ToString('0.000000', $invariant)
+          $audioDuration = ([double]$report.frameIdentity.actual.audioDurationSeconds).ToString('0.000000', $invariant)
+          $containerDuration = ([double]$report.frameIdentity.actual.containerDurationSeconds).ToString('0.000000', $invariant)
+          $durationTolerance = ([double]$report.frameIdentity.expected.videoTimestampToleranceSeconds).ToString('0.000000', $invariant)
+          $summary = "PASS prod $($report.frameIdentity.counts.decodedVideoFrames)/$($report.frameIdentity.expected.frames) frames; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; FFmpeg checks passed; vtol=${durationTolerance}s"
+          "summary=$summary" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Require CI-only FFmpeg and ffprobe
+        shell: pwsh
+        run: |
+          $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
+          for ($attempt = 1; $attempt -le 3 -and (-not $ffmpeg -or -not $ffprobe); $attempt++) {
+            Write-Output "Installing CI-only FFmpeg/ffprobe (attempt $attempt/3)."
+            try {
+              choco install ffmpeg --yes --no-progress
+            } catch {
+              Write-Output "FFmpeg package install attempt $attempt failed: $_"
+            }
+            $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
+            if ((-not $ffmpeg -or -not $ffprobe) -and $attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+          }
+          if (-not $ffmpeg -or -not $ffprobe) {
+            Write-Output '::error title=CI-only FFmpeg setup failed::ffmpeg and ffprobe are required for independent export validation.'
+            throw 'Could not install the required CI-only FFmpeg/ffprobe tools after three attempts.'
+          }
+          $ffmpeg = Get-Command ffmpeg -ErrorAction Stop
+          $ffprobe = Get-Command ffprobe -ErrorAction Stop
+          ffmpeg -version | Select-Object -First 1
+          ffprobe -version | Select-Object -First 1
+          python --version
+          "FFMPEG_PATH=$($ffmpeg.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FFPROBE_PATH=$($ffprobe.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Independently decode and validate production export with FFmpeg/ffprobe
+        id: independent-export-validation
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'clipwright-production-export-artifacts'
+          $smokeReportPath = Join-Path $env:RUNNER_TEMP 'deterministic-export-smoke.json'
+          $validationReportPath = Join-Path $env:RUNNER_TEMP 'ffmpeg-independent-validation.json'
+          python scripts\validate-export-smoke.py --artifact-dir $artifactDirectory --ffmpeg $env:FFMPEG_PATH --ffprobe $env:FFPROBE_PATH --smoke-report $smokeReportPath --report $validationReportPath
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $validationReportPath) {
+              $failed = Get-Content -Raw $validationReportPath | ConvertFrom-Json
+              $details = ($failed | ConvertTo-Json -Depth 8 -Compress).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              if ($details.Length -gt 5000) { $details = $details.Substring(0, 5000) }
+              Write-Output "::error title=Independent FFmpeg/ffprobe diagnostics::$details"
+            }
+            throw 'Independent FFmpeg/ffprobe validation failed.'
+          }
+          $independent = Get-Content -Raw $validationReportPath | ConvertFrom-Json
+          if (-not $independent.pass) { throw 'Independent validator did not report pass.' }
+          $maxAudioOnsetError = ($independent.timing.audioOnsetErrorsSeconds | ForEach-Object { [Math]::Abs([double]$_) } | Measure-Object -Maximum).Maximum
+          $maxPacketSpacingError = ($independent.timing.audioPacketSpacingErrorsSeconds | ForEach-Object { [Math]::Abs([double]$_) } | Measure-Object -Maximum).Maximum
+          $maxAvSyncError = ($independent.timing.avSyncEvents | ForEach-Object { [Math]::Abs([double]$_.audioMinusVideoSeconds) } | Measure-Object -Maximum).Maximum
+          $evidence = [ordered]@{
+            codecs = $independent.codec
+            counts = $independent.counts
+            timing = [ordered]@{
+              expectedDurationSeconds = $independent.timing.expectedDurationSeconds
+              videoDurationSeconds = $independent.timing.videoDurationSeconds
+              audioDecodedDurationSeconds = $independent.timing.audioDecodedDurationSeconds
+              containerDurationSeconds = $independent.timing.containerDurationSeconds
+              durationDeltasSeconds = $independent.timing.durationDeltasSeconds
+              videoTimestampToleranceSeconds = $independent.timing.videoTimestampToleranceSeconds
+              audioDurationToleranceSeconds = $independent.timing.audioDurationToleranceSeconds
+              containerDurationToleranceSeconds = $independent.timing.containerDurationToleranceSeconds
+              audioOnsetToleranceSeconds = $independent.timing.audioOnsetToleranceSeconds
+              videoTimestampErrorRangeSeconds = $independent.timing.videoTimestampErrorRangeSeconds
+              maxAbsAudioOnsetErrorSeconds = $maxAudioOnsetError
+              maxAbsAudioPacketSpacingErrorSeconds = $maxPacketSpacingError
+              audioPacketSpacingToleranceSeconds = $independent.timing.audioPacketSpacingToleranceSeconds
+              avSyncEventCount = $independent.timing.avSyncEvents.Count
+              maxAbsAvSyncErrorSeconds = $maxAvSyncError
+            }
+            content = $independent.content
+            mp4ProductionOutputs = $independent.mp4ProductionOutputs
+            requiredMp4Coverage = $independent.requiredMp4Coverage
+            runtime = $independent.runtime
+            encoder = $independent.encoder
+          }
+          $evidenceDetails = ($evidence | ConvertTo-Json -Depth 8 -Compress).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+          Write-Output "::notice title=Independent production export evidence::$evidenceDetails"
+          @"
+          ## Independent FFmpeg/ffprobe result
+          - WebM full decode: $($independent.counts.fullDecodedVideoFrames) / $($independent.counts.ffprobeFrames) video frames; $($independent.counts.audioPackets) Opus packets.
+          - Required independent MP4/custom outputs: $($independent.mp4ProductionOutputs | ConvertTo-Json -Compress -Depth 7).
+          - WebM video/audio codec: $($independent.codec.video) / $($independent.codec.audio); synthetic source full-decode checks: $($independent.syntheticSources.A.fullDecode), $($independent.syntheticSources.B.fullDecode).
+          - Runtime: Electron $($independent.runtime.electronVersion), Chromium $($independent.runtime.chromiumVersion); WebCodecs hardware/software backend is not exposed.
+          - Timing: video $($independent.timing.videoDurationSeconds)s, decoded audio $($independent.timing.audioDecodedDurationSeconds)s, container $($independent.timing.containerDurationSeconds)s; tolerances video $($independent.timing.videoTimestampToleranceSeconds)s, audio $($independent.timing.audioDurationToleranceSeconds)s, container $($independent.timing.containerDurationToleranceSeconds)s, A/V onset $($independent.timing.audioOnsetToleranceSeconds)s.
+          - Content: $($independent.content.identityFramesCompared) independently decoded frame identities; $($independent.content.mismatchCount) mismatches; flash frames $($independent.content.syncFlashIndexes).
+          - Encoder configurations are WebCodecs effective configuration; physical hardware encoder is not asserted (hardwareAcceleration is only a preference).
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Publish Windows production WebM and MP4 smoke measurements
+        uses: actions/github-script@v7
+        env:
+          SMOKE_SUMMARY: ${{ steps.packaged-smoke.outputs.summary }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'success',
+              context: 'Windows deterministic WebM/MP4 production export',
+              description: process.env.SMOKE_SUMMARY,
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+      - name: Upload synthetic export, FFmpeg, and Windows build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipWright-Windows-build-diagnostics
+          path: |
+            ${{ runner.temp }}/windows-installer-build.log
+            ${{ runner.temp }}/deterministic-export-smoke.json
+            ${{ runner.temp }}/packaged-smoke-stdout.log
+            ${{ runner.temp }}/packaged-smoke-stderr.log
+            ${{ runner.temp }}/ffmpeg-independent-validation.json
+            ${{ runner.temp }}/clipwright-production-export-artifacts/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload unsigned installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipWright-Windows-unsigned-x64
+          path: release/ClipWright-Studio-Setup-*-x64.exe
+          if-no-files-found: error
+          retention-days: 14

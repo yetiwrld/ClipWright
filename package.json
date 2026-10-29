@@ -1,0 +1,85 @@
+{
+  "name": "clipwright-studio",
+  "productName": "ClipWright Studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "description": "Local-first video editing and clipping studio",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build && vite build --config vite.validation.config.ts && vite build --config vite.smoke.config.ts",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:desktop": "node --test electron/security.test.cjs electron/projectFiles.test.cjs electron/exportFiles.test.cjs",
+    "desktop:dev": "concurrently -k -s last \"vite --host 127.0.0.1 --port 5174 --strictPort\" \"wait-on tcp:127.0.0.1:5174 && cross-env CLIPWRIGHT_RENDERER_URL=http://127.0.0.1:5174 electron .\"",
+    "desktop:preview": "npm run build && electron .",
+    "desktop:smoke": "npm run build && cross-env CLIPWRIGHT_SMOKE_TEST=1 electron .",
+    "desktop:dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "mediabunny": "^1.63.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^10.0.6",
+    "cross-env": "^10.1.0",
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
+    "jsdom": "^30.1.3",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.5",
+    "vitest": "^5.0.5",
+    "wait-on": "^9.5.1"
+  },
+  "build": {
+    "appId": "com.clipwright.studio",
+    "productName": "ClipWright Studio",
+    "directories": {
+      "output": "release",
+      "buildResources": "packaging"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "icon": "packaging/clipwright.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ClipWright-Studio-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "installerIcon": "packaging/clipwright.ico",
+      "uninstallerIcon": "packaging/clipwright.ico"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+# Dependencies and build output
+node_modules/
+dist/
+release/
+coverage/
+.vite/
+*.log
+npm-debug.log*
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# User media, project files, and generated content
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.m4a
+*.aiff
+*.flac
+*.webm
+*.cwproject
+*.cwproject-*
+projects/
+exports/
+media/
+models/
+cache/
+*.sqlite
+*.sqlite3
+*.db
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
