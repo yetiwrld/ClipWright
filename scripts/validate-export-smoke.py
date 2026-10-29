@@ -171,7 +171,7 @@ def main():
 
     width, height = int(fixture["width"]), int(fixture["height"])
     video_decode = subprocess.run([
-        args.ffmpeg, "-v", "warning", "-xerror", "-i", str(output_path), "-map", "0:v:0", "-vsync", "0",
+        args.ffmpeg, "-v", "warning", "-xerror", "-i", str(output_path), "-map", "0:v:0", "-fps_mode", "passthrough",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ], check=False, capture_output=True)
     if video_decode.returncode != 0:
