@@ -397,8 +397,36 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       && result.measurements.firstVideoTimestampError === null
       && Math.abs(videoDurationDeltaSeconds) <= videoDurationToleranceSeconds
       && Math.abs(containerDurationDeltaSeconds) <= containerDurationToleranceSeconds;
+    stage = 'checking unsupported odd-dimension MP4 through production export';
+    reportProgress(stage);
+    const unsupportedProject = parseProjectDocument(serializeProjectDocument({
+      ...savedProject,
+      sequences: savedProject.sequences.map((sequence) => sequence.id === savedProject.projectSettings.defaultSequenceId
+        ? { ...sequence, width: 233, height: TEST_HEIGHT }
+        : sequence),
+    }));
+    let unsupportedConfigurationRejected = false;
+    let unsupportedConfigurationError: string | null = null;
+    try {
+      await exportTimelineProject({
+        projectSnapshot: unsupportedProject,
+        sourceBlobs,
+        sequenceId: unsupportedProject.projectSettings.defaultSequenceId,
+        resolution: 'sequence',
+        quality: 'standard',
+        container: 'mp4',
+        signal: new AbortController().signal,
+      });
+    } catch (error) {
+      unsupportedConfigurationError = error instanceof Error ? error.message : String(error);
+      unsupportedConfigurationRejected = unsupportedConfigurationError.includes('even integer output dimensions')
+        && unsupportedConfigurationError.includes('MP4 was not substituted');
+    }
+    if (!unsupportedConfigurationRejected) {
+      throw new Error(`Production MP4 did not reject the unsupported 233 × ${TEST_HEIGHT} canvas without fallback: ${unsupportedConfigurationError ?? 'export unexpectedly completed'}.`);
+    }
     const report = {
-      pass: videoPass && audioPass,
+      pass: videoPass && audioPass && unsupportedConfigurationRejected,
       stage,
       fixture: 'saved-project-timeline-audio-video-identity',
       projectId: result.projectId,
@@ -413,6 +441,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
         expectedAudioPulseFrameIndexes: EXPECTED_AUDIO_PULSE_FRAME_INDEXES,
         expectedAudioPulseOnsetsSeconds: EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS,
         expectedFlashFrameIndexes,
+        unsupportedMp4Configuration: { width: 233, height: TEST_HEIGHT, expected: 'explicit rejection before encoder/muxer output; no resize or fallback' },
       },
       counts: { ...result.counts, outputVideoPackets: result.measurements.outputVideoPackets, decodedVideoFrames: fileFrameIdentities.length },
       actual: {
@@ -437,6 +466,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
         avSyncChecks,
         encoderConfiguration: result.encoderConfiguration,
         outputDimensions: result.outputDimensions,
+        unsupportedMp4Configuration: { width: 233, height: TEST_HEIGHT, rejected: unsupportedConfigurationRejected, error: unsupportedConfigurationError },
       },
       mismatchCount: mismatches.length,
       mismatches: mismatches.slice(0, 12),
@@ -444,23 +474,25 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       gapFrameIndexes: [40, 41, 42, 43, 44],
       offlineFrameIndexes: [45, 46, 47, 48, 49],
     };
-    const makeSizedProject = (width: number, height: number, stripAudio = false) => parseProjectDocument(serializeProjectDocument({
+    const makeSizedProject = (width: number, height: number, stripAudio = false, canvasFit: 'fit' | 'fill' | 'stretch' = 'fit', canvasBackground = '#000000') => parseProjectDocument(serializeProjectDocument({
       ...savedProject,
       assets: savedProject.assets.map((asset) => stripAudio ? { ...asset, streams: { video: asset.streams.video } } as MediaAsset : asset),
       sequences: savedProject.sequences.map((sequence) => sequence.id === savedProject.projectSettings.defaultSequenceId
-        ? { ...sequence, width, height, canvasFit: 'fit' as const, canvasBackground: '#000000' }
+        ? { ...sequence, width, height, canvasFit, canvasBackground }
         : sequence),
     }));
-    const summarizeProductionOutput = (name: string, exportResult: Awaited<ReturnType<typeof exportTimelineProject>>, width: number, height: number, includeAudio: boolean, container: 'mp4' | 'webm') => {
+    const summarizeProductionOutput = (name: string, exportResult: Awaited<ReturnType<typeof exportTimelineProject>>, width: number, height: number, includeAudio: boolean, container: 'mp4' | 'webm', canvasFit: 'fit' | 'fill' | 'stretch' = 'fit', canvasBackground = '#000000') => {
       const exactCounts = areExportFrameCountsExact(plan.frameCount, { ...exportResult.counts, outputFilePackets: exportResult.measurements.outputVideoPackets });
       const codecMatches = container === 'mp4'
         ? exportResult.measurements.videoCodec === 'avc' && (!includeAudio || (exportResult.measurements.audioCodec === 'aac' && exportResult.measurements.mimeType.includes('mp4a.40.2')))
         : exportResult.measurements.videoCodec === 'vp9' && (!includeAudio || exportResult.measurements.audioCodec === 'opus');
       const passed = exactCounts && codecMatches && exportResult.expectedAudioTrack === includeAudio
         && exportResult.measurements.width === width && exportResult.measurements.height === height
+        && exportResult.outputComposition.fit === canvasFit && exportResult.outputComposition.background.toLowerCase() === canvasBackground.toLowerCase()
         && exportResult.measurements.videoTimestampsMonotonic && exportResult.measurements.firstVideoTimestampError === null;
       const check = {
         name, container, passed, expectedDimensions: { width, height }, actualDimensions: { width: exportResult.measurements.width, height: exportResult.measurements.height },
+        expectedComposition: { fit: canvasFit, background: canvasBackground }, actualComposition: exportResult.outputComposition,
         expectedAudioTrack: includeAudio, actualAudioTrack: exportResult.expectedAudioTrack,
         codec: { video: exportResult.measurements.videoCodec, audio: exportResult.measurements.audioCodec, mimeType: exportResult.measurements.mimeType },
         frameCounts: { ...exportResult.counts, outputVideoPackets: exportResult.measurements.outputVideoPackets, expected: plan.frameCount },
@@ -510,33 +542,51 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
 
     stage = 'testing custom-dimension MP4 and WebM production outputs';
     reportProgress(stage);
-    const customProject = makeSizedProject(234, 146, true);
+    const customProject = makeSizedProject(234, 146, true, 'fill', '#142b40');
     const customMp4 = await exportTimelineProject({
       projectSnapshot: customProject, sourceBlobs, sequenceId: customProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
     mp4Artifacts['timeline-custom.mp4'] = arrayBufferToBase64(customMp4.buffer);
-    mp4Production.push(summarizeProductionOutput('custom-234x146-video-only', customMp4, 234, 146, false, 'mp4'));
+    mp4Production.push(summarizeProductionOutput('custom-234x146-video-only', customMp4, 234, 146, false, 'mp4', 'fill', '#142b40'));
+    const customWebmProject = makeSizedProject(234, 146, true, 'stretch', '#1a3048');
     const customWebm = await exportTimelineProject({
-      projectSnapshot: customProject, sourceBlobs, sequenceId: customProject.projectSettings.defaultSequenceId,
+      projectSnapshot: customWebmProject, sourceBlobs, sequenceId: customWebmProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'webm', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
     mp4Artifacts['timeline-custom.webm'] = arrayBufferToBase64(customWebm.buffer);
-    mp4Production.push(summarizeProductionOutput('custom-234x146-webm-video-only', customWebm, 234, 146, false, 'webm'));
+    mp4Production.push(summarizeProductionOutput('custom-234x146-webm-video-only', customWebm, 234, 146, false, 'webm', 'stretch', '#1a3048'));
     if (mp4Production.length !== 4 || mp4Production.some((check) => check.passed !== true)) throw new Error('Required production MP4/WebM dimension and track coverage is incomplete.');
     if (!fixtureMetadata) throw new Error('The fixture manifest is unavailable for production MP4 evidence.');
     fixtureMetadata.mp4Outputs = {
-      'timeline-export.mp4': { container: 'mp4', width: 180, height: 320, audio: true, videoCodec: 'h264', audioCodec: 'aac', profile: 'LC' },
-      'timeline-video-only.mp4': { container: 'mp4', width: TEST_WIDTH, height: TEST_HEIGHT, audio: false, videoCodec: 'h264' },
-      'timeline-custom.mp4': { container: 'mp4', width: 234, height: 146, audio: false, videoCodec: 'h264' },
-      'timeline-custom.webm': { container: 'webm', width: 234, height: 146, audio: false, videoCodec: 'vp9' },
+      'timeline-export.mp4': { container: 'mp4', width: 180, height: 320, audio: true, videoCodec: 'h264', audioCodec: 'aac', profile: 'LC', canvasFit: 'fit', canvasBackground: '#000000' },
+      'timeline-video-only.mp4': { container: 'mp4', width: TEST_WIDTH, height: TEST_HEIGHT, audio: false, videoCodec: 'h264', canvasFit: 'fit', canvasBackground: '#000000' },
+      'timeline-custom.mp4': { container: 'mp4', width: 234, height: 146, audio: false, videoCodec: 'h264', canvasFit: 'fill', canvasBackground: '#142b40' },
+      'timeline-custom.webm': { container: 'webm', width: 234, height: 146, audio: false, videoCodec: 'vp9', canvasFit: 'stretch', canvasBackground: '#1a3048' },
       cancellationThenRetryPassed: mp4CancellationObserved,
+      unsupportedConfiguration: {
+        width: 233,
+        height: TEST_HEIGHT,
+        rejected: unsupportedConfigurationRejected,
+        error: unsupportedConfigurationError,
+        expected: 'explicit rejection; no resize, encoder output, or container fallback',
+      },
       aacSamplesPerAccessUnit: AAC_LC_SAMPLES_PER_PACKET,
     };
-    Object.assign(report, { mp4Production, mp4CancellationThenRetryPassed: mp4CancellationObserved });
-    report.pass = Boolean(report.pass && mp4Production.length === 4 && mp4Production.every((check) => check.passed === true) && mp4CancellationObserved);
+    const requiredMp4Coverage = {
+      videoOnly: mp4Production.some((check) => check.name === 'landscape-video-only' && check.passed === true),
+      videoWithAacLc: mp4Production.some((check) => check.name === 'portrait-av-retry' && check.passed === true),
+      landscape: mp4Production.some((check) => check.name === 'landscape-video-only' && check.passed === true),
+      portrait: mp4Production.some((check) => check.name === 'portrait-av-retry' && check.passed === true),
+      customDimensions: mp4Production.some((check) => check.name === 'custom-234x146-video-only' && check.passed === true),
+      independentDecode: true,
+      cancellationRetry: mp4CancellationObserved,
+      unsupportedConfigurationRejected,
+    };
+    Object.assign(report, { mp4Production, mp4CancellationThenRetryPassed: mp4CancellationObserved, requiredMp4Coverage });
+    report.pass = Boolean(report.pass && mp4Production.length === 4 && mp4Production.every((check) => check.passed === true) && mp4CancellationObserved && unsupportedConfigurationRejected);
 
     const sourceBase64 = { A: arrayBufferToBase64(sourceA), B: arrayBufferToBase64(sourceB) };
     const artifacts = {

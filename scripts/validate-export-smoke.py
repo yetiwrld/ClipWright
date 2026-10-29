@@ -20,14 +20,19 @@ def sample_rgb(frame, width, x, y):
     return tuple(frame[offset:offset + 3])
 
 
-def classify_frame(frame, width, height):
-    scale = min(width / 320.0, height / 180.0)
-    offset_x = (width - 320 * scale) / 2
-    offset_y = (height - 180 * scale) / 2
+def classify_frame(frame, width, height, canvas_fit="fit", canvas_background="#000000"):
+    if canvas_fit == "stretch":
+        scale_x, scale_y = width / 320.0, height / 180.0
+        offset_x = offset_y = 0.0
+    else:
+        scale = (min if canvas_fit == "fit" else max)(width / 320.0, height / 180.0)
+        scale_x = scale_y = scale
+        offset_x = (width - 320 * scale) / 2
+        offset_y = (height - 180 * scale) / 2
 
     def source_pixel(x, y):
-        out_x = min(width - 1, max(0, round(offset_x + x * scale)))
-        out_y = min(height - 1, max(0, round(offset_y + y * scale)))
+        out_x = min(width - 1, max(0, round(offset_x + x * scale_x)))
+        out_y = min(height - 1, max(0, round(offset_y + y * scale_y)))
         return sample_rgb(frame, width, out_x, out_y)
 
     red, green, blue = source_pixel(18, 90)
@@ -38,7 +43,8 @@ def classify_frame(frame, width, height):
         source_id = "B"
     if source_id is None:
         background = source_pixel(306, 164)
-        if max(background) < 20:
+        expected_background = tuple(int(canvas_background[index:index + 2], 16) for index in (1, 3, 5))
+        if all(abs(actual - expected) <= 24 for actual, expected in zip(background, expected_background)):
             return {"sourceId": None, "frameIndex": None, "isGap": True, "hasSyncFlash": False}
     frame_index = 0
     for bit in range(6):
@@ -154,7 +160,7 @@ def validate_dimension_output(path, specification, fixture, source_frame_times, 
     decoded_count, remainder = divmod(len(decoded.stdout), bytes_per_frame)
     if remainder or decoded_count != expected_count:
         raise AssertionError(f"{path.name}: FFmpeg decoded {decoded_count} frames (remainder={remainder}); expected {expected_count}")
-    actual_frames = [classify_frame(decoded.stdout[index * bytes_per_frame:(index + 1) * bytes_per_frame], expected_width, expected_height) for index in range(expected_count)]
+    actual_frames = [classify_frame(decoded.stdout[index * bytes_per_frame:(index + 1) * bytes_per_frame], expected_width, expected_height, specification.get("canvasFit", "fit"), specification.get("canvasBackground", "#000000")) for index in range(expected_count)]
     expected = expected_frames(fixture, source_frame_times)
     mismatches = [{"frame": index, "expected": expected[index], "actual": actual_frames[index]} for index in range(expected_count) if expected[index] != actual_frames[index]]
     if mismatches:
@@ -165,6 +171,7 @@ def validate_dimension_output(path, specification, fixture, source_frame_times, 
         "container": "MP4" if expected_video_codec == "h264" else "WebM",
         "codec": {"video": video.get("codec_name"), "profile": video.get("profile"), "audio": audio.get("codec_name") if audio else None, "audioProfile": audio.get("profile") if audio else None},
         "dimensions": {"width": expected_width, "height": expected_height},
+        "canvasComposition": {"fit": specification.get("canvasFit", "fit"), "background": specification.get("canvasBackground", "#000000")},
         "counts": {"ffprobeFrames": len(frame_data), "fullyDecodedFrames": decoded_count},
         "content": {"identityFramesCompared": expected_count, "mismatchCount": len(mismatches), "firstMismatch": None},
         "timing": {"videoTimebaseSeconds": video_timebase, "videoTimestampToleranceSeconds": video_tolerance, "timestampErrorRangeSeconds": [min(timestamp_errors), max(timestamp_errors)]},
@@ -323,7 +330,7 @@ def main():
     decoded_frame_count, remainder = divmod(len(decoded), bytes_per_frame)
     if remainder or decoded_frame_count != expected_count:
         raise AssertionError(f"FFmpeg full decode produced {decoded_frame_count} frames with {remainder} trailing bytes; expected {expected_count}")
-    actual_frames = [classify_frame(decoded[index * bytes_per_frame:(index + 1) * bytes_per_frame], width, height) for index in range(expected_count)]
+    actual_frames = [classify_frame(decoded[index * bytes_per_frame:(index + 1) * bytes_per_frame], width, height, fixture.get("canvasFit", "fit"), fixture.get("canvasBackground", "#000000")) for index in range(expected_count)]
     expected = expected_frames(fixture, source_frame_times)
     mismatches = [
         {"frameIndex": index, "timestampSeconds": frame_times[index], "expected": expected[index], "actual": actual_frames[index]}
@@ -450,20 +457,38 @@ def main():
         raise AssertionError("Production smoke did not report required MP4 and custom-dimension output specifications")
     if mp4_specs.get("cancellationThenRetryPassed") is not True or smoke.get("frameIdentity", {}).get("mp4CancellationThenRetryPassed") is not True:
         raise AssertionError("Production MP4 cancellation cleanup and retry coverage is missing or failed")
+    unsupported = mp4_specs.get("unsupportedConfiguration")
+    required_coverage = smoke.get("frameIdentity", {}).get("requiredMp4Coverage", {})
+    if not isinstance(unsupported, dict) or unsupported.get("rejected") is not True or unsupported.get("width") != 233 or unsupported.get("height") != fixture.get("height"):
+        raise AssertionError("Production smoke did not explicitly reject the unsupported odd-width MP4 configuration")
+    if required_coverage.get("unsupportedConfigurationRejected") is not True:
+        raise AssertionError("Unsupported MP4 configuration coverage is missing from the production smoke report")
+    rejection = str(unsupported.get("error", ""))
+    if "even integer output dimensions" not in rejection or "MP4 was not substituted" not in rejection:
+        raise AssertionError("Unsupported MP4 configuration did not fail explicitly without resize or container fallback")
     mp4_production = smoke.get("frameIdentity", {}).get("mp4Production", [])
     if len(mp4_production) != 4 or any(item.get("passed") is not True for item in mp4_production):
         raise AssertionError("Production smoke did not pass all required MP4/WebM format, track, and dimension configurations")
     independent_outputs = []
     for name in required_outputs:
         specification = mp4_specs.get(name)
-        if not isinstance(specification, dict) or not {"width", "height", "audio", "videoCodec"}.issubset(specification):
-            raise AssertionError(f"Production smoke is missing exact codec/dimension metadata for {name}")
+        if not isinstance(specification, dict) or not {"width", "height", "audio", "videoCodec", "canvasFit", "canvasBackground"}.issubset(specification):
+            raise AssertionError(f"Production smoke is missing exact codec/dimension/composition metadata for {name}")
+        if specification["canvasFit"] not in ("fit", "fill", "stretch"):
+            raise AssertionError(f"Production smoke reported an invalid canvas composition for {name}")
+        background = specification["canvasBackground"]
+        if not isinstance(background, str) or len(background) != 7 or not background.startswith("#"):
+            raise AssertionError(f"Production smoke reported an invalid canvas background for {name}")
+        try:
+            int(background[1:], 16)
+        except ValueError as error:
+            raise AssertionError(f"Production smoke reported an invalid canvas background for {name}") from error
         independent_outputs.append(validate_dimension_output(root / name, specification, fixture, source_frame_times, args.ffmpeg, args.ffprobe))
 
     report["mp4ProductionOutputs"] = independent_outputs
     report["productionMp4CancellationThenRetryPassed"] = True
     report["runtime"] = smoke.get("runtime", {})
-    report["requiredMp4Coverage"] = {"videoOnly": True, "videoWithAacLc": True, "landscape": True, "portrait": True, "customDimensions": True, "independentDecode": True, "cancellationRetry": True}
+    report["requiredMp4Coverage"] = {"videoOnly": True, "videoWithAacLc": True, "landscape": True, "portrait": True, "customDimensions": True, "independentDecode": True, "cancellationRetry": True, "unsupportedConfigurationRejected": True}
     report["pass"] = True
     Path(args.report).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))

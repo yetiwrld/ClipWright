@@ -168,7 +168,17 @@ export interface Mp4EncodingCapability {
 
 /** Checks the exact output dimensions, frame rate, bitrate, sample rate, and encoder preferences used by MP4 export. */
 export async function checkMp4EncodingSupport(request: Mp4EncodingCapabilityRequest): Promise<Mp4EncodingCapability> {
-  if (typeof VideoEncoder === 'undefined') return { videoSupported: false, audioSupported: !request.includeAudio, supported: false, reason: 'This Chromium runtime does not expose WebCodecs VideoEncoder.' };
+  const audioSupported = !request.includeAudio || (typeof AudioEncoder !== 'undefined' && await canEncodeAudio('aac', {
+    numberOfChannels: 2,
+    sampleRate: request.audioSampleRate,
+    bitrate: request.audioBitrate,
+    bitrateMode: 'variable',
+  }));
+  if (!Number.isSafeInteger(request.width) || !Number.isSafeInteger(request.height)
+    || request.width < 2 || request.height < 2 || request.width % 2 !== 0 || request.height % 2 !== 0) {
+    return { videoSupported: false, audioSupported, supported: false, reason: `MP4 H.264/AVC requires even integer output dimensions; the selected canvas is ${request.width} × ${request.height}. Dimensions will not be resized. Choose an even-sized canvas or WebM; MP4 was not substituted.` };
+  }
+  if (typeof VideoEncoder === 'undefined') return { videoSupported: false, audioSupported, supported: false, reason: 'This Chromium runtime does not expose WebCodecs VideoEncoder.' };
   const hardwareAcceleration = request.hardwareAcceleration ?? 'no-preference';
   const videoSupported = await canEncodeVideo('avc', {
     width: request.width,
@@ -180,12 +190,6 @@ export async function checkMp4EncodingSupport(request: Mp4EncodingCapabilityRequ
     hardwareAcceleration,
     alpha: 'discard',
   });
-  const audioSupported = !request.includeAudio || (typeof AudioEncoder !== 'undefined' && await canEncodeAudio('aac', {
-    numberOfChannels: 2,
-    sampleRate: request.audioSampleRate,
-    bitrate: request.audioBitrate,
-    bitrateMode: 'variable',
-  }));
   const reason = !videoSupported
     ? `H.264/AVC is not available for ${request.width} × ${request.height} at ${request.frameRate.toFixed(3)} fps and ${request.videoBitrate} bit/s.`
     : !audioSupported

@@ -44,6 +44,7 @@ export interface TimelineExportResult extends DeterministicWebmResult {
   sequenceId: string;
   expectedAudioTrack: boolean;
   outputDimensions: { width: number; height: number };
+  outputComposition: { fit: NonNullable<Sequence['canvasFit']>; background: string };
   encoderConfiguration: { video: EncoderConfigDiagnostic | null; audio: EncoderConfigDiagnostic | null };
   durationValidation: {
     expectedSeconds: number;
@@ -284,6 +285,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       measurements,
       expectedAudioTrack,
       outputDimensions,
+      outputComposition: { fit: sequence.canvasFit ?? 'fit', background: sequence.canvasBackground ?? '#000000' },
       encoderConfiguration,
       durationValidation,
       sourceMediaIncluded: false,
@@ -313,6 +315,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       sequenceId: sequence.id,
       expectedAudioTrack,
       outputDimensions,
+      outputComposition: { fit: sequence.canvasFit ?? 'fit', background: sequence.canvasBackground ?? '#000000' },
       encoderConfiguration,
       durationValidation,
     };

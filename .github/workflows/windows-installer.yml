@@ -86,6 +86,7 @@ jobs:
                 frameIdentityPass = $frame.pass
                 stage = $frame.stage
                 error = $frame.error
+                requiredMp4Coverage = $frame.requiredMp4Coverage
                 expectedAudioPulseFrameIndexes = $frame.expected.expectedAudioPulseFrameIndexes
                 expectedAudioPulseOnsetsSeconds = $frame.expected.expectedAudioPulseOnsetsSeconds
                 expectedFlashFrameIndexes = $frame.expected.expectedFlashFrameIndexes
@@ -118,6 +119,7 @@ jobs:
           - Video tolerance: $($report.frameIdentity.expected.videoTimestampToleranceSeconds)s; audio duration: $($report.frameIdentity.expected.audioDurationToleranceSeconds)s; A/V onset: $($report.frameIdentity.expected.audioOnsetToleranceSeconds)s.
           - Required production MP4/WebM coverage (real encoders and muxers; no codec-capability skip): $($report.frameIdentity.mp4Production | ConvertTo-Json -Compress -Depth 7).
           - MP4 cancellation cleanup followed by a successful portrait H.264/AAC retry: $($report.frameIdentity.mp4CancellationThenRetryPassed).
+          - Unsupported odd-canvas MP4 config was rejected through the production path without resize/fallback: $($report.frameIdentity.requiredMp4Coverage.unsupportedConfigurationRejected); evidence: $($report.frameIdentity.actual.unsupportedMp4Configuration | ConvertTo-Json -Compress -Depth 5).
           - Runtime: Electron $($report.runtime.electronVersion), Chromium $($report.runtime.chromiumVersion), Node $($report.runtime.nodeVersion); WebCodecs backend mode exposed by API: $($report.runtime.actualHardwareSoftwareBackend).
           - WebCodecs config (hardwareAcceleration is a preference, not hardware proof): WebM video $($report.frameIdentity.actual.encoderConfiguration.video | ConvertTo-Json -Compress -Depth 5); audio $($report.frameIdentity.actual.encoderConfiguration.audio | ConvertTo-Json -Compress -Depth 5).
           - Synthetic-only artifacts: generated source files, exact saved-project JSON, fixture manifest, actual production WebM/MP4 files, smoke report, and independent FFmpeg/ffprobe report.

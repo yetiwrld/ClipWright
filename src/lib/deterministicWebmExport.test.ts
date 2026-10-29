@@ -4,6 +4,7 @@ import {
   OPUS_PACKET_DURATION_SECONDS,
   aacPacketDurationSeconds,
   areExportFrameCountsExact,
+  checkMp4EncodingSupport,
   audioDurationToleranceSeconds,
   audioOnsetToleranceSeconds,
   createSequenceExportPlan,
@@ -45,6 +46,19 @@ describe('deterministic sequence export plan', () => {
     expect(historicalDelta).toBeCloseTo(0.4126666667, 9);
     expect(Math.abs(historicalDelta)).toBeGreaterThan(audioDurationTolerance);
     // This asserts only the threshold arithmetic; it does not reproduce or resolve the user's historical export.
+  });
+
+  it('rejects odd MP4 canvas dimensions explicitly without checking or resizing the encoder request', async () => {
+    const result = await checkMp4EncodingSupport({
+      width: 233, height: 180, frameRate: 30, videoBitrate: 400_000, audioBitrate: 160_000,
+      audioSampleRate: 48_000, includeAudio: false,
+    });
+    expect(result.supported).toBe(false);
+    expect(result.videoSupported).toBe(false);
+    expect(result.reason).toContain('even integer output dimensions');
+    expect(result.reason).toContain('233 × 180');
+    expect(result.reason).toContain('Dimensions will not be resized');
+    expect(result.reason).toContain('MP4 was not substituted');
   });
 
   it('derives MP4 AAC-LC timing from its 1024-sample access units without applying the Opus packet duration', () => {
