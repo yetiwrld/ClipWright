@@ -149,7 +149,15 @@ jobs:
           $smokeReportPath = Join-Path $env:RUNNER_TEMP 'deterministic-webm-smoke.json'
           $validationReportPath = Join-Path $env:RUNNER_TEMP 'ffmpeg-independent-validation.json'
           python scripts\validate-export-smoke.py --artifact-dir $artifactDirectory --ffmpeg $env:FFMPEG_PATH --ffprobe $env:FFPROBE_PATH --smoke-report $smokeReportPath --report $validationReportPath
-          if ($LASTEXITCODE -ne 0) { throw 'Independent FFmpeg/ffprobe validation failed.' }
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $validationReportPath) {
+              $failed = Get-Content -Raw $validationReportPath | ConvertFrom-Json
+              $details = ($failed | ConvertTo-Json -Depth 8 -Compress).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              if ($details.Length -gt 5000) { $details = $details.Substring(0, 5000) }
+              Write-Output "::error title=Independent FFmpeg/ffprobe diagnostics::$details"
+            }
+            throw 'Independent FFmpeg/ffprobe validation failed.'
+          }
           $independent = Get-Content -Raw $validationReportPath | ConvertFrom-Json
           if (-not $independent.pass) { throw 'Independent validator did not report pass.' }
           @"
