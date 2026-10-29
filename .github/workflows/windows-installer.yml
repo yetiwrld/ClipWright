@@ -130,8 +130,22 @@ jobs:
       - name: Require CI-only FFmpeg and ffprobe
         shell: pwsh
         run: |
-          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
-            choco install ffmpeg --yes --no-progress
+          $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
+          for ($attempt = 1; $attempt -le 3 -and (-not $ffmpeg -or -not $ffprobe); $attempt++) {
+            Write-Output "Installing CI-only FFmpeg/ffprobe (attempt $attempt/3)."
+            try {
+              choco install ffmpeg --yes --no-progress
+            } catch {
+              Write-Output "FFmpeg package install attempt $attempt failed: $_"
+            }
+            $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
+            if ((-not $ffmpeg -or -not $ffprobe) -and $attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+          }
+          if (-not $ffmpeg -or -not $ffprobe) {
+            Write-Output '::error title=CI-only FFmpeg setup failed::ffmpeg and ffprobe are required for independent export validation.'
+            throw 'Could not install the required CI-only FFmpeg/ffprobe tools after three attempts.'
           }
           $ffmpeg = Get-Command ffmpeg -ErrorAction Stop
           $ffprobe = Get-Command ffprobe -ErrorAction Stop
