@@ -174,10 +174,29 @@ jobs:
           }
           $independent = Get-Content -Raw $validationReportPath | ConvertFrom-Json
           if (-not $independent.pass) { throw 'Independent validator did not report pass.' }
+          $maxAudioOnsetError = ($independent.timing.audioOnsetErrorsSeconds | ForEach-Object { [Math]::Abs([double]$_) } | Measure-Object -Maximum).Maximum
+          $maxPacketSpacingError = ($independent.timing.audioPacketSpacingErrorsSeconds | ForEach-Object { [Math]::Abs([double]$_) } | Measure-Object -Maximum).Maximum
+          $maxAvSyncError = ($independent.timing.avSyncEvents | ForEach-Object { [Math]::Abs([double]$_.audioMinusVideoSeconds) } | Measure-Object -Maximum).Maximum
           $evidence = [ordered]@{
             codecs = $independent.codec
             counts = $independent.counts
-            timing = $independent.timing
+            timing = [ordered]@{
+              expectedDurationSeconds = $independent.timing.expectedDurationSeconds
+              videoDurationSeconds = $independent.timing.videoDurationSeconds
+              audioDecodedDurationSeconds = $independent.timing.audioDecodedDurationSeconds
+              containerDurationSeconds = $independent.timing.containerDurationSeconds
+              durationDeltasSeconds = $independent.timing.durationDeltasSeconds
+              videoTimestampToleranceSeconds = $independent.timing.videoTimestampToleranceSeconds
+              audioDurationToleranceSeconds = $independent.timing.audioDurationToleranceSeconds
+              containerDurationToleranceSeconds = $independent.timing.containerDurationToleranceSeconds
+              audioOnsetToleranceSeconds = $independent.timing.audioOnsetToleranceSeconds
+              videoTimestampErrorRangeSeconds = $independent.timing.videoTimestampErrorRangeSeconds
+              maxAbsAudioOnsetErrorSeconds = $maxAudioOnsetError
+              maxAbsAudioPacketSpacingErrorSeconds = $maxPacketSpacingError
+              audioPacketSpacingToleranceSeconds = $independent.timing.audioPacketSpacingToleranceSeconds
+              avSyncEventCount = $independent.timing.avSyncEvents.Count
+              maxAbsAvSyncErrorSeconds = $maxAvSyncError
+            }
             content = $independent.content
             encoder = $independent.encoder
           }
