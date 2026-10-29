@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { createProject, PROJECTS_KEY, writeProjects } from './lib/projects';
 import { createProjectDocument, PROJECT_DOCUMENTS_KEY, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
+import type { ProjectDocument } from './lib/projectDocument';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -203,6 +204,99 @@ describe('ClipWright foundation UI', () => {
     expect(screen.getByRole('button', { name: 'Exit focus mode' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Exit focus mode' }));
     expect(shell.classList.contains('is-editor-focus')).toBe(false);
+  });
+
+  it('routes the missing-image banner relink action to the image picker', async () => {
+    const project = createProject('Offline still image', '16:9', 30, new Date('2025-01-01T00:00:00.000Z'));
+    const projectDocument = createProjectDocument(project, '0.1.0');
+    const videoTrack = projectDocument.sequences[0].tracks.find((track) => track.kind === 'video')!;
+    projectDocument.assets.push({
+      id: 'offline-image-asset', name: 'still.png', sourcePath: 'Media/still.png', pathKind: 'project-relative', kind: 'image',
+      streams: {}, imageDimensions: { width: 1600, height: 900 },
+    });
+    videoTrack.clips.push({ id: 'offline-image-clip', sourceId: 'offline-image-asset', trackId: videoTrack.id, start: 0, trimIn: 0, trimOut: 5 });
+    projectDocument.sequences[0].durationFrames = 150;
+    writeProjects(window.localStorage, [project]);
+    writeProjectDocuments(window.localStorage, [projectDocument]);
+    const selectedInputs: string[] = [];
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      selectedInputs.push(this.getAttribute('aria-label') ?? '');
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: `Open ${project.name}` }));
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Relink still.png' }));
+
+    expect(selectedInputs).toContain('Choose a local image file');
+    expect(selectedInputs).not.toContain('Choose a local video file');
+  });
+
+  it('relinks an offline still image in place and keeps the timeline clip attached to the same asset', async () => {
+    const project = createProject('Relink still image', '16:9', 30, new Date('2025-01-01T00:00:00.000Z'));
+    const projectDocument = createProjectDocument(project, '0.1.0');
+    const videoTrack = projectDocument.sequences[0].tracks.find((track) => track.kind === 'video')!;
+    projectDocument.assets.push({
+      id: 'stable-image-asset', name: 'original.png', sourcePath: 'Media/original.png', pathKind: 'project-relative', kind: 'image',
+      streams: {}, fileSizeBytes: 100, fingerprint: 'a'.repeat(64), imageDimensions: { width: 640, height: 360 },
+    });
+    videoTrack.clips.push({ id: 'stable-image-clip', sourceId: 'stable-image-asset', trackId: videoTrack.id, start: 0, trimIn: 0, trimOut: 5 });
+    projectDocument.sequences[0].durationFrames = 150;
+    writeProjects(window.localStorage, [project]);
+    writeProjectDocuments(window.localStorage, [projectDocument]);
+    const bitmap = { width: 1280, height: 720, close: vi.fn() } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:relinked-still'), revokeObjectURL: vi.fn() });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const library = {
+      initialize: vi.fn(async () => ({ root: '/local/clipwright', directories: {}, projects: [], issues: [] })),
+      saveProject: vi.fn(async (_payload: { contents: string }) => ({ changed: true, recoveryId: null, documentId: project.id, contentHash: 'hash', projectId: project.id })),
+      resolveMedia: vi.fn(async () => []),
+      importFile: vi.fn(async (_file: File, payload: { projectId: string; assetId: string; mode: string }) => ({
+        ...payload, mode: 'managed', name: 'replacement.png', sourcePath: 'Media/replacement.png', pathKind: 'project-relative',
+        fileSizeBytes: 200, fingerprint: 'b'.repeat(64), mediaUrl: 'clipwright-media://replacement',
+      })),
+    };
+    Object.defineProperty(window, 'clipwright', { configurable: true, value: { library } });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: `Open ${project.name}` }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Relink$/ }));
+    const replacement = new File(['replacement image bytes'], 'replacement.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText('Choose a local image file'), { target: { files: [replacement] } });
+
+    expect(await screen.findByRole('img', { name: 'Timeline image: replacement.png' })).toBeTruthy();
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('original.png'));
+    expect(library.importFile).toHaveBeenCalledWith(replacement, { projectId: project.id, assetId: 'stable-image-asset', mode: 'managed' });
+    await waitFor(() => {
+      const saved = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]').find((entry: ProjectDocument) => entry.id === project.id);
+      expect(saved.assets).toHaveLength(1);
+      expect(saved.assets[0]).toMatchObject({ id: 'stable-image-asset', name: 'replacement.png', fingerprint: 'b'.repeat(64), imageDimensions: { width: 1280, height: 720 } });
+      expect(saved.sequences[0].tracks[0].clips[0]).toMatchObject({ id: 'stable-image-clip', sourceId: 'stable-image-asset', trimOut: 5 });
+    });
+    expect(bitmap.close).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).not.toContain('blob:');
+  });
+
+  it('rejects undecodable still images and releases the temporary object URL', async () => {
+    const project = createProject('Invalid still image', '16:9', 30, new Date('2025-01-01T00:00:00.000Z'));
+    const projectDocument = createProjectDocument(project, '0.1.0');
+    writeProjects(window.localStorage, [project]);
+    writeProjectDocuments(window.localStorage, [projectDocument]);
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => { throw new Error('decode failed'); }));
+    const createObjectURL = vi.fn(() => 'blob:invalid-still');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: `Open ${project.name}` }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import a local image' }));
+    fireEvent.change(screen.getByLabelText('Choose a local image file'), { target: { files: [new File(['not an image'], 'broken.png', { type: 'image/png' })] } });
+
+    expect((await screen.findByRole('alert')).textContent).toContain('cannot decode the selected image');
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:invalid-still');
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]')[0].assets).toHaveLength(0));
   });
 
   it('imports, previews, places, and duration-edits a still image without embedding its bytes', async () => {

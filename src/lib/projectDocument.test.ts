@@ -51,6 +51,35 @@ describe('versioned project documents', () => {
     if (!invalidBackground.valid) expect(invalidBackground.errors).toContain('sequences[0].canvasBackground must be a six-digit hex color.');
   });
 
+  it('round-trips image-only assets on video tracks and rejects audio placement or overlong image clips', () => {
+    const document = createProjectDocument(createProject('Still-image schema', '16:9', 30));
+    const videoTrack = document.sequences[0].tracks.find((track) => track.kind === 'video')!;
+    const audioTrack = document.sequences[0].tracks.find((track) => track.kind === 'audio')!;
+    document.assets.push({
+      id: 'image-source', name: 'title.webp', sourcePath: 'Media/title.webp', pathKind: 'project-relative', kind: 'image',
+      streams: {}, fileSizeBytes: 2048, fingerprint: 'a'.repeat(64), imageDimensions: { width: 1600, height: 900 },
+    });
+    videoTrack.clips.push({ id: 'image-clip', sourceId: 'image-source', trackId: videoTrack.id, start: 0, trimIn: 0, trimOut: 5 });
+    document.sequences[0].durationFrames = 150;
+    const reopened = parseProjectDocument(serializeProjectDocument(document));
+    expect(reopened.assets[0]).toMatchObject({ kind: 'image', streams: {}, imageDimensions: { width: 1600, height: 900 } });
+    expect(reopened.sequences[0].tracks[0].clips[0]).toMatchObject({ sourceId: 'image-source', trimOut: 5 });
+    expect(JSON.stringify(reopened)).not.toContain('data:image/');
+
+    videoTrack.clips = [];
+    audioTrack.clips.push({ id: 'wrong-track-image-clip', sourceId: 'image-source', trackId: audioTrack.id, start: 0, trimIn: 0, trimOut: 5 });
+    const wrongTrack = validateProjectDocument(document);
+    expect(wrongTrack.valid).toBe(false);
+    if (!wrongTrack.valid) expect(wrongTrack.errors).toContain('sequences[0].tracks[1].clips[0] source media kind must match its track kind.');
+
+    audioTrack.clips = [];
+    videoTrack.clips.push({ id: 'overlong-image-clip', sourceId: 'image-source', trackId: videoTrack.id, start: 0, trimIn: 0, trimOut: 3601 });
+    document.sequences[0].durationFrames = 108030;
+    const overlong = validateProjectDocument(document);
+    expect(overlong.valid).toBe(false);
+    if (!overlong.valid) expect(overlong.errors).toContain('sequences[0].tracks[0].clips[0].trimOut exceeds the still-image clip duration limit.');
+  });
+
   it('supports backward-compatible per-track gain and pan settings', () => {
     const document = createProjectDocument(createProject('Audio controls', '16:9', 30));
     const audioTrack = document.sequences[0].tracks.find((track) => track.kind === 'audio')!;
