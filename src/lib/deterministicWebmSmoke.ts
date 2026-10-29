@@ -579,31 +579,40 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     stage = 'testing production video-only H.264 MP4';
     reportProgress(stage);
     const landscapeVideoOnly = makeSizedProject(TEST_WIDTH, TEST_HEIGHT, true);
+    const videoOnlyOutput = createMemoryOutputStream();
     const videoOnlyMp4 = await exportTimelineProject({
       projectSnapshot: landscapeVideoOnly, sourceBlobs: videoOnlySourceBlobs, sequenceId: landscapeVideoOnly.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
+      outputStream: videoOnlyOutput,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-video-only.mp4'] = arrayBufferToBase64(requireExportBuffer(videoOnlyMp4));
+    if (videoOnlyMp4.buffer !== null) throw new Error('The streamed video-only MP4 smoke unexpectedly retained a full output buffer.');
+    mp4Artifacts['timeline-video-only.mp4'] = arrayBufferToBase64(videoOnlyOutput.getBuffer());
     mp4Production.push(summarizeProductionOutput('landscape-video-only', videoOnlyMp4, TEST_WIDTH, TEST_HEIGHT, false, 'mp4'));
 
     stage = 'testing custom-dimension MP4 and WebM production outputs';
     reportProgress(stage);
     const customProject = makeSizedProject(234, 146, true, 'fill', '#142b40');
+    const customMp4Output = createMemoryOutputStream();
     const customMp4 = await exportTimelineProject({
       projectSnapshot: customProject, sourceBlobs: videoOnlySourceBlobs, sequenceId: customProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
+      outputStream: customMp4Output,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-custom.mp4'] = arrayBufferToBase64(requireExportBuffer(customMp4));
+    if (customMp4.buffer !== null) throw new Error('The streamed custom MP4 smoke unexpectedly retained a full output buffer.');
+    mp4Artifacts['timeline-custom.mp4'] = arrayBufferToBase64(customMp4Output.getBuffer());
     mp4Production.push(summarizeProductionOutput('custom-234x146-video-only', customMp4, 234, 146, false, 'mp4', 'fill', '#142b40'));
     const customWebmProject = makeSizedProject(234, 146, true, 'stretch', '#1a3048');
+    const customWebmOutput = createMemoryOutputStream();
     const customWebm = await exportTimelineProject({
       projectSnapshot: customWebmProject, sourceBlobs: videoOnlySourceBlobs, sequenceId: customWebmProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'webm', signal: new AbortController().signal,
+      outputStream: customWebmOutput,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
-    mp4Artifacts['timeline-custom.webm'] = arrayBufferToBase64(requireExportBuffer(customWebm));
+    if (customWebm.buffer !== null) throw new Error('The streamed custom WebM smoke unexpectedly retained a full output buffer.');
+    mp4Artifacts['timeline-custom.webm'] = arrayBufferToBase64(customWebmOutput.getBuffer());
     mp4Production.push(summarizeProductionOutput('custom-234x146-webm-video-only', customWebm, 234, 146, false, 'webm', 'stretch', '#1a3048'));
     if (mp4Production.length !== 4 || mp4Production.some((check) => check.passed !== true)) throw new Error('Required production MP4/WebM dimension and track coverage is incomplete.');
     if (!fixtureMetadata) throw new Error('The fixture manifest is unavailable for production MP4 evidence.');
