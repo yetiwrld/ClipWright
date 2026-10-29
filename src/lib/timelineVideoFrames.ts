@@ -88,8 +88,8 @@ export function selectActiveVideoClip(
   if (!Number.isFinite(timelineTimeSeconds)) return null;
   return clips
     .filter((clip) => !hiddenTrackIds[clip.trackId]
-      && timelineTimeSeconds >= clip.start - 1e-9
-      && timelineTimeSeconds < clipEnd(clip) - 1e-9)
+      && timelineTimeSeconds >= clip.start - CANVAS_TIMESTAMP_EPSILON_SECONDS
+      && timelineTimeSeconds < clipEnd(clip) - CANVAS_TIMESTAMP_EPSILON_SECONDS)
     .sort((left, right) => tracks.findIndex((track) => track.id === right.trackId) - tracks.findIndex((track) => track.id === left.trackId))[0] ?? null;
 }
 

@@ -17,6 +17,14 @@ describe('timeline video frame selection and draw policy', () => {
     expect(selectActiveVideoClip([first, second], [lower], 2)).toBeNull();
   });
 
+  it('keeps microsecond-rounded frame timestamps on the correct side of exact clip cuts', () => {
+    const boundary = 40 / 30;
+    const first = clip('first', lower.id, 0, 0, boundary);
+    const second = clip('second', lower.id, boundary, 0, 1 / 30);
+    const roundedBoundaryTimestamp = Math.round(boundary * 1_000_000) / 1_000_000;
+    expect(selectActiveVideoClip([first, second], [lower], roundedBoundaryTimestamp)?.id).toBe('second');
+  });
+
   it('uses the topmost unhidden video track for overlaps and reveals the lower clip when hidden', () => {
     const base = clip('base', lower.id, 0, 0, 4);
     const overlay = clip('overlay', upper.id, 1, 3, 6);

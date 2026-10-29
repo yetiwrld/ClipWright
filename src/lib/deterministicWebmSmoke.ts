@@ -187,10 +187,26 @@ const EXPECTED_IDENTITY_PLACEMENTS = [
   { startFrame: 32, endFrame: 40, sourceId: 'B' as const, sourceFrameStart: 12 },
   { startFrame: 50, endFrame: 65, sourceId: 'A' as const, sourceFrameStart: 10 },
 ];
-const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = [1, 10, 17, 24, 33, 55, 62].map((frameIndex) => frameIndex / 30);
-const EXPECTED_FLASH_FRAME_INDEXES = [1, 10, 17, 24, 33, 55, 62];
+const EXPECTED_AUDIO_PULSE_FRAME_INDEXES = [1, 10, 17, 24, 33, 55, 62];
+const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = EXPECTED_AUDIO_PULSE_FRAME_INDEXES.map((frameIndex) => frameIndex / 30);
 const AUDIO_ACTIVITY_THRESHOLD = 0.18;
 const AUDIO_ACTIVITY_GAP_SECONDS = 0.025;
+
+function buildExpectedFrameIdentities(frameCount: number, sourceFrames: ReadonlyMap<'A' | 'B', TimedFrameIdentity[]>): FrameIdentity[] {
+  return Array.from({ length: frameCount }, (_, frameIndex) => {
+    const placement = EXPECTED_IDENTITY_PLACEMENTS.find(({ startFrame, endFrame }) => frameIndex >= startFrame && frameIndex < endFrame);
+    if (!placement) return { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
+    const requestedSourceTime = placement.sourceFrameStart / TEST_RATE.numerator
+      + (frameIndex - placement.startFrame) / TEST_RATE.numerator;
+    const decodedSource = sourceFrames.get(placement.sourceId) ?? [];
+    let expectedSourceFrame: TimedFrameIdentity | undefined;
+    for (const sourceFrame of decodedSource) {
+      if (sourceFrame.timestampSeconds > requestedSourceTime + 1 / 1_000_000) break;
+      expectedSourceFrame = sourceFrame;
+    }
+    return expectedSourceFrame?.identity ?? { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
+  });
+}
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer);
@@ -257,6 +273,9 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       decodedSourceFrames.set(sourceId, decoded);
     }
 
+    const expectedFrameIdentities = buildExpectedFrameIdentities(65, decodedSourceFrames);
+    const expectedFlashFrameIndexes = expectedFrameIdentities.flatMap((frame, index) => frame.hasSyncFlash ? [index] : []);
+
     stage = 'serializing and validating saved project snapshot';
     reportProgress(stage);
     const fixture = makeTimelineIdentityFixture();
@@ -281,8 +300,9 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       expectedPlacements: EXPECTED_IDENTITY_PLACEMENTS,
       expectedGapFrames: Array.from({ length: 5 }, (_, offset) => 40 + offset),
       expectedOfflineFrames: Array.from({ length: 5 }, (_, offset) => 45 + offset),
+      expectedAudioPulseFrameIndexes: EXPECTED_AUDIO_PULSE_FRAME_INDEXES,
       expectedAudioPulseOnsetsSeconds: EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS,
-      expectedFlashFrameIndexes: EXPECTED_FLASH_FRAME_INDEXES,
+      expectedFlashFrameIndexes,
       timingPolicy: {
         matroskaTimecodeScaleNanoseconds: 1_000_000,
         videoTimestampToleranceSeconds: videoTimestampToleranceSeconds(plan.frameDurationSeconds, WEBM_TIMEBASE_SECONDS),
@@ -312,19 +332,6 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     stage = 'independently checking decoded production export';
     reportProgress(stage);
     const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress, 'production saved-project output');
-    const expectedFrameIdentities: FrameIdentity[] = Array.from({ length: plan.frameCount }, (_, frameIndex) => {
-      const placement = EXPECTED_IDENTITY_PLACEMENTS.find(({ startFrame, endFrame }) => frameIndex >= startFrame && frameIndex < endFrame);
-      if (!placement) return { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
-      const requestedSourceTime = placement.sourceFrameStart / TEST_RATE.numerator
-        + (frameIndex - placement.startFrame) / TEST_RATE.numerator;
-      const decodedSource = decodedSourceFrames.get(placement.sourceId) ?? [];
-      let expectedSourceFrame: TimedFrameIdentity | undefined;
-      for (const sourceFrame of decodedSource) {
-        if (sourceFrame.timestampSeconds > requestedSourceTime + 1 / 1_000_000) break;
-        expectedSourceFrame = sourceFrame;
-      }
-      return expectedSourceFrame?.identity ?? { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
-    });
     const timestampToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / result.measurements.videoTimeResolution);
     const mismatches = expectedFrameIdentities.flatMap((expected, index) => {
       const actual = fileFrameIdentities[index]?.identity;
@@ -356,25 +363,28 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       return { index, expectedSeconds, actualSeconds, errorSeconds, passed: errorSeconds !== null && Math.abs(errorSeconds) <= audioOnsetTolerance };
     });
     const actualFlashFrames = fileFrameIdentities.flatMap((frame, index) => frame.identity.hasSyncFlash ? [{ frameIndex: index, timestampSeconds: frame.timestampSeconds }] : []);
-    const avSyncChecks = EXPECTED_FLASH_FRAME_INDEXES.map((frameIndex, index) => {
-      const videoFlash = actualFlashFrames[index];
+    const avSyncChecks = EXPECTED_AUDIO_PULSE_FRAME_INDEXES.map((frameIndex, index) => {
+      const videoFrame = fileFrameIdentities[frameIndex];
       const actualAudio = audioAnalysis.onsetsSeconds[index];
       const expectedVideoSeconds = plan.timestampSeconds(frameIndex);
-      const measuredOffsetSeconds = videoFlash && actualAudio !== undefined ? actualAudio - videoFlash.timestampSeconds : null;
+      const actualVideoSeconds = videoFrame?.timestampSeconds ?? null;
+      const measuredOffsetSeconds = actualVideoSeconds !== null && actualAudio !== undefined ? actualAudio - actualVideoSeconds : null;
       return {
         frameIndex,
         expectedVideoSeconds,
-        actualVideoSeconds: videoFlash?.timestampSeconds ?? null,
+        actualVideoSeconds,
+        videoFlashPresent: videoFrame?.identity.hasSyncFlash ?? false,
         actualAudioSeconds: actualAudio ?? null,
         audioMinusVideoSeconds: measuredOffsetSeconds,
-        passed: measuredOffsetSeconds !== null && Math.abs(measuredOffsetSeconds) <= audioOnsetTolerance,
+        passed: videoFrame?.identity.hasSyncFlash === true
+          && measuredOffsetSeconds !== null
+          && Math.abs(measuredOffsetSeconds) <= audioOnsetTolerance,
       };
     });
     const audioPass = result.expectedAudioTrack
       && (result.measurements.outputAudioPackets ?? 0) > 0
       && audioAnalysis.onsetsSeconds.length === EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS.length
       && audioOnsetMatches.every(({ passed }) => passed)
-      && actualFlashFrames.length === EXPECTED_FLASH_FRAME_INDEXES.length
       && avSyncChecks.every(({ passed }) => passed);
     const videoPass = countsMatch
       && fileFrameIdentities.length === plan.frameCount
@@ -396,8 +406,9 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
         videoTimestampToleranceSeconds,
         audioDurationToleranceSeconds: audioDurationTolSeconds,
         audioOnsetToleranceSeconds: audioOnsetTolerance,
+        expectedAudioPulseFrameIndexes: EXPECTED_AUDIO_PULSE_FRAME_INDEXES,
         expectedAudioPulseOnsetsSeconds: EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS,
-        expectedFlashFrameIndexes: EXPECTED_FLASH_FRAME_INDEXES,
+        expectedFlashFrameIndexes,
       },
       counts: { ...result.counts, outputVideoPackets: result.measurements.outputVideoPackets, decodedVideoFrames: fileFrameIdentities.length },
       actual: {

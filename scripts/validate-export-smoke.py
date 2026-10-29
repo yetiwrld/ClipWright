@@ -225,11 +225,16 @@ def main():
         raise AssertionError(f"audio onset {bad} error {audio_onset_errors[bad]:.9f}s exceeds {audio_onset_tolerance:.9f}s")
 
     flash_indexes = [index for index, frame in enumerate(actual_frames) if frame["hasSyncFlash"]]
-    expected_flash_indexes = [int(value) for value in fixture["expectedFlashFrameIndexes"]]
+    expected_flash_indexes = [index for index, frame in enumerate(expected) if frame["hasSyncFlash"]]
     if flash_indexes != expected_flash_indexes:
         raise AssertionError(f"decoded video sync flashes at {flash_indexes}; expected {expected_flash_indexes}")
+    pulse_frame_indexes = [int(value) for value in fixture["expectedAudioPulseFrameIndexes"]]
+    if len(pulse_frame_indexes) != len(audio_onsets):
+        raise AssertionError("fixture audio pulse frame count does not match decoded onset count")
     av_sync = []
-    for index, (frame_index, audio_onset) in enumerate(zip(flash_indexes, audio_onsets)):
+    for index, (frame_index, audio_onset) in enumerate(zip(pulse_frame_indexes, audio_onsets)):
+        if not actual_frames[frame_index]["hasSyncFlash"]:
+            raise AssertionError(f"expected A/V flash marker is absent at pulse onset frame {frame_index}")
         video_time = frame_times[frame_index]
         offset = audio_onset - video_time
         av_sync.append({"event": index, "videoFrame": frame_index, "videoTimestampSeconds": video_time, "audioOnsetSeconds": audio_onset, "audioMinusVideoSeconds": offset})
