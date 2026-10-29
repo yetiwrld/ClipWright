@@ -276,14 +276,18 @@ function runRendererSmokeCheck(window) {
         if (!exportSmokeStarted) {
           exportSmokeStarted = true;
           stage = 'running deterministic WebM export and frame-identity smoke';
-          smokeMeasurements = await Promise.race([
-            window.webContents.executeJavaScript(`import('./export-smoke.js').then(({ runDeterministicWebmSmoke }) => runDeterministicWebmSmoke((stage) => { window.__clipwrightSmokeStage = stage; }))`),
+          const smokePayload = await Promise.race([
+            window.webContents.executeJavaScript(`import('./export-smoke.js').then(async ({ runDeterministicWebmSmoke }) => {
+              const result = await runDeterministicWebmSmoke((stage) => { window.__clipwrightSmokeStage = stage; });
+              return JSON.stringify(result);
+            })`),
             new Promise((_, reject) => setTimeout(async () => {
               let currentStage = 'smoke progress was not reported';
               try { currentStage = await window.webContents.executeJavaScript('window.__clipwrightSmokeStage ?? "smoke progress was not reported"'); } catch { /* Preserve the timeout if renderer diagnostics are unavailable. */ }
               reject(new Error(`Deterministic WebM export smoke timed out after 120 seconds; last stage: ${currentStage}`));
             }, 120_000)),
           ]);
+          smokeMeasurements = typeof smokePayload === 'string' ? JSON.parse(smokePayload) : smokePayload;
           await writeSmokeArtifacts(smokeMeasurements?.artifacts);
           const report = reportWithoutArtifacts(smokeMeasurements);
           await writeSmokeReport(report);
