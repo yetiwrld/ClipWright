@@ -101,7 +101,7 @@ function readIdentity(canvas: HTMLCanvasElement | OffscreenCanvas): FrameIdentit
   return { sourceId, frameIndex, isGap: false, hasSyncFlash };
 }
 
-async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokeProgress) {
+async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokeProgress, includeAudio = true) {
   reportProgress(`encoding source ${sourceId} identity footage`);
   const canvas = document.createElement('canvas');
   canvas.width = TEST_WIDTH;
@@ -110,7 +110,7 @@ async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokePr
   if (!context) throw new Error('Could not create a frame-identity source canvas.');
   const plan = createSequenceExportPlan(30, TEST_RATE);
   const sampleRate = 48_000;
-  const audioContext = new OfflineAudioContext(2, 24_000, sampleRate);
+  const audioContext = includeAudio ? new OfflineAudioContext(2, 24_000, sampleRate) : null;
   const sourcePulses = IDENTITY_AUDIO_PULSES[sourceId].map((pulse) => ({
     startSeconds: pulse.frameIndex / TEST_RATE.numerator,
     endSeconds: (pulse.frameIndex + 2) / TEST_RATE.numerator,
@@ -121,12 +121,12 @@ async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokePr
     plan,
     videoBitrate: 800_000,
     audioBitrate: 64_000,
-    includeAudio: true,
+    includeAudio,
     signal: new AbortController().signal,
     drawFrame: async (frameIndex) => drawIdentityFrame(context, sourceId, frameIndex),
-    renderAudioChunk: async (startSeconds, durationSeconds) => {
+    ...(includeAudio ? { renderAudioChunk: async (startSeconds: number, durationSeconds: number) => {
       const sampleCount = Math.max(1, Math.round(durationSeconds * sampleRate));
-      const audioBuffer = audioContext.createBuffer(2, sampleCount, sampleRate);
+      const audioBuffer = audioContext!.createBuffer(2, sampleCount, sampleRate);
       const left = audioBuffer.getChannelData(0);
       const right = audioBuffer.getChannelData(1);
       for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
@@ -138,7 +138,7 @@ async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokePr
         right[sampleIndex] = value;
       }
       return audioBuffer;
-    },
+    } } : {}),
   });
   if (!areExportFrameCountsExact(30, { ...result.counts, outputFilePackets: result.measurements.outputVideoPackets })) {
     throw new Error(`The ${sourceId} frame-identity source did not encode exactly 30 frames.`);
@@ -322,6 +322,12 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     const sourceBlobs = new Map<string, Blob>([
       ['A', new Blob([sourceA], { type: 'video/webm' })],
       ['B', new Blob([sourceB], { type: 'video/webm' })],
+    ]);
+    const videoOnlySourceA = await encodeIdentitySource('A', reportProgress, false);
+    const videoOnlySourceB = await encodeIdentitySource('B', reportProgress, false);
+    const videoOnlySourceBlobs = new Map<string, Blob>([
+      ['A', new Blob([videoOnlySourceA], { type: 'video/webm' })],
+      ['B', new Blob([videoOnlySourceB], { type: 'video/webm' })],
     ]);
     const plan = createSequenceExportPlan(savedProject.sequences[0].durationFrames, savedProject.sequences[0].frameRate);
     fixtureMetadata = {
@@ -574,7 +580,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     reportProgress(stage);
     const landscapeVideoOnly = makeSizedProject(TEST_WIDTH, TEST_HEIGHT, true);
     const videoOnlyMp4 = await exportTimelineProject({
-      projectSnapshot: landscapeVideoOnly, sourceBlobs, sequenceId: landscapeVideoOnly.projectSettings.defaultSequenceId,
+      projectSnapshot: landscapeVideoOnly, sourceBlobs: videoOnlySourceBlobs, sequenceId: landscapeVideoOnly.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
@@ -585,7 +591,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     reportProgress(stage);
     const customProject = makeSizedProject(234, 146, true, 'fill', '#142b40');
     const customMp4 = await exportTimelineProject({
-      projectSnapshot: customProject, sourceBlobs, sequenceId: customProject.projectSettings.defaultSequenceId,
+      projectSnapshot: customProject, sourceBlobs: videoOnlySourceBlobs, sequenceId: customProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'mp4', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
@@ -593,7 +599,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     mp4Production.push(summarizeProductionOutput('custom-234x146-video-only', customMp4, 234, 146, false, 'mp4', 'fill', '#142b40'));
     const customWebmProject = makeSizedProject(234, 146, true, 'stretch', '#1a3048');
     const customWebm = await exportTimelineProject({
-      projectSnapshot: customWebmProject, sourceBlobs, sequenceId: customWebmProject.projectSettings.defaultSequenceId,
+      projectSnapshot: customWebmProject, sourceBlobs: videoOnlySourceBlobs, sequenceId: customWebmProject.projectSettings.defaultSequenceId,
       resolution: 'sequence', quality: 'standard', container: 'webm', signal: new AbortController().signal,
       onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
     });
