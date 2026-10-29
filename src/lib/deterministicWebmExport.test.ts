@@ -59,6 +59,37 @@ describe('deterministic sequence export plan', () => {
     expect(frameCountForEndTime(boundary, frameRate)).toBe(10);
     expect(frameCountForEndTime(boundary + 1e-8, frameRate)).toBe(11);
   });
+
+  it('schedules a ten-minute 30000/1001 sequence without accumulated frame-boundary drift', async () => {
+    const frameRate = { numerator: 30_000, denominator: 1_001 };
+    const frameCount = frameCountForEndTime(600, frameRate);
+    const plan = createSequenceExportPlan(frameCount, frameRate);
+    let rendered = 0;
+    let submitted = 0;
+    let lastTimestamp = -1;
+    let totalSubmittedDuration = 0;
+    const counts = await runExactFramePipeline(
+      plan,
+      async (index, timestamp) => {
+        expect(timestamp).toBe(plan.timestampSeconds(index));
+        rendered += 1;
+      },
+      async (index, timestamp, duration) => {
+        expect(timestamp).toBe(plan.timestampSeconds(index));
+        expect(duration).toBe(plan.frameDurationAt(index));
+        lastTimestamp = timestamp;
+        totalSubmittedDuration += duration;
+        submitted += 1;
+      },
+    );
+    expect(frameCount).toBe(17_983);
+    expect(counts).toEqual({ requested: frameCount, rendered: frameCount, submitted: frameCount });
+    expect(rendered).toBe(frameCount);
+    expect(submitted).toBe(frameCount);
+    expect(lastTimestamp).toBe(plan.timestampSeconds(frameCount - 1));
+    expect(totalSubmittedDuration).toBeCloseTo(plan.durationSeconds, 6);
+    expect(plan.durationSeconds).toBeGreaterThanOrEqual(600);
+  });
 });
 
 describe('frame-index export loop', () => {

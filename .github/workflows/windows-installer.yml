@@ -72,7 +72,7 @@ jobs:
           }
           $report = Get-Content -Raw $reportPath | ConvertFrom-Json
           if (-not $report.pass) {
-            throw "Deterministic WebM frame-count or duration gate failed: $($report | ConvertTo-Json -Depth 8 -Compress)"
+            throw "Deterministic WebM frame-count, duration, or decoded A/V-offset gate failed: $($report | ConvertTo-Json -Depth 8 -Compress)"
           }
           @"
           ## Packaged Windows deterministic WebM export smoke
@@ -80,15 +80,18 @@ jobs:
           - Frame counts: requested $($report.counts.requested), rendered $($report.counts.rendered), submitted $($report.counts.submitted), encoded $($report.counts.encoded), output file $($report.counts.outputFile).
           - Video: $($report.actual.videoDurationSeconds)s (delta $($report.actual.videoDurationDeltaSeconds)s), measured rate $($report.actual.measuredVideoFrameRate) fps, $($report.actual.videoDimensions.width)x$($report.actual.videoDimensions.height).
           - Audio: $($report.actual.audioDurationSeconds)s (delta $($report.actual.audioDurationDeltaSeconds)s); container: $($report.actual.containerDurationSeconds)s (delta $($report.actual.containerDurationDeltaSeconds)s).
-          - One-frame duration tolerance: $($report.expected.oneFrameToleranceSeconds)s. Gate: PASS.
+          - Decoded synthetic signal A/V offset: expected $($report.expected.audioMinusVideoOffsetSeconds)s, measured $($report.actual.decodedAvOffset.audioMinusVideoOffsetSeconds)s, error $($report.actual.avOffsetErrorSeconds)s; one-frame tolerance $($report.expected.oneFrameToleranceSeconds)s.
+          - One-frame duration and A/V-offset tolerances: $($report.expected.oneFrameToleranceSeconds)s. Gate: PASS.
           - Frame identity: $($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames) decoded frames matched source A/B frame IDs and black-gap/offline expectations; $($report.frameIdentity.mismatchCount) mismatches. Fixture includes cuts, trims, adjacent split clips, a 5-frame gap, and a 5-frame offline clip.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           $invariant = [System.Globalization.CultureInfo]::InvariantCulture
           $videoDuration = ([double]$report.actual.videoDurationSeconds).ToString('0.000000', $invariant)
           $audioDuration = ([double]$report.actual.audioDurationSeconds).ToString('0.000000', $invariant)
           $containerDuration = ([double]$report.actual.containerDurationSeconds).ToString('0.000000', $invariant)
+          $avOffset = ([double]$report.actual.decodedAvOffset.audioMinusVideoOffsetSeconds).ToString('0.000000', $invariant)
+          $avOffsetError = ([double]$report.actual.avOffsetErrorSeconds).ToString('0.000000', $invariant)
           $durationTolerance = ([double]$report.expected.oneFrameToleranceSeconds).ToString('0.000000', $invariant)
-          $summary = "PASS $($report.counts.encoded)/$($report.expected.frameCount) A/V frames @$($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator)fps; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; id=$($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames),err=$($report.frameIdentity.mismatchCount); tol=${durationTolerance}s"
+          $summary = "PASS $($report.counts.encoded)/$($report.expected.frameCount) A/V frames @$($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator)fps; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; av=${avOffset}s/err=${avOffsetError}s; id=$($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames),err=$($report.frameIdentity.mismatchCount); tol=${durationTolerance}s"
           "summary=$summary" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Publish Windows WebM smoke measurements

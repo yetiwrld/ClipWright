@@ -1,4 +1,4 @@
-import { ALL_FORMATS, BufferSource, CanvasSink, Input } from 'mediabunny';
+import { ALL_FORMATS, AudioBufferSink, BufferSource, CanvasSink, Input } from 'mediabunny';
 import { areExportFrameCountsExact, createSequenceExportPlan, encodeDeterministicWebm } from './deterministicWebmExport';
 import { CANVAS_TIMESTAMP_EPSILON_SECONDS, drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
 import { validateProjectDocument } from './projectDocument';
@@ -234,8 +234,52 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
   }
 }
 
+async function measureDecodedAvOffset(buffer: ArrayBuffer) {
+  const input = new Input({ source: new BufferSource(buffer), formats: ALL_FORMATS });
+  try {
+    const videoTrack = await input.getPrimaryVideoTrack();
+    const audioTrack = await input.getPrimaryAudioTrack();
+    if (!videoTrack || !audioTrack) throw new Error('The A/V offset smoke could not find both finalized WebM tracks.');
+
+    let videoFlashTimestampSeconds: number | null = null;
+    const videoSink = new CanvasSink(videoTrack);
+    for await (const frame of videoSink.canvases()) {
+      const context = frame.canvas.getContext('2d');
+      if (!context) throw new Error('The A/V offset smoke could not inspect a decoded video frame.');
+      const [red, green, blue] = context.getImageData(24, 24, 1, 1).data;
+      if (red > 190 && green > 190 && blue > 190) {
+        videoFlashTimestampSeconds = frame.timestamp;
+        break;
+      }
+    }
+
+    let audioPulseTimestampSeconds: number | null = null;
+    const audioSink = new AudioBufferSink(audioTrack);
+    for await (const part of audioSink.buffers()) {
+      const channel = part.buffer.getChannelData(0);
+      for (let sampleIndex = 0; sampleIndex < channel.length; sampleIndex += 1) {
+        if (Math.abs(channel[sampleIndex]) > 0.04) {
+          audioPulseTimestampSeconds = part.timestamp + sampleIndex / part.buffer.sampleRate;
+          break;
+        }
+      }
+      if (audioPulseTimestampSeconds !== null) break;
+    }
+    if (videoFlashTimestampSeconds === null || audioPulseTimestampSeconds === null) {
+      throw new Error('The finalized WebM A/V offset smoke could not find its decoded video flash and audio pulse.');
+    }
+    return {
+      videoFlashTimestampSeconds,
+      audioPulseTimestampSeconds,
+      audioMinusVideoOffsetSeconds: audioPulseTimestampSeconds - videoFlashTimestampSeconds,
+    };
+  } finally {
+    input.dispose();
+  }
+}
+
 async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
-  reportProgress('encoding one-second audio/container duration smoke');
+  reportProgress('encoding one-second duration and decoded A/V-offset smoke');
   const frameRate = TEST_RATE;
   const plan = createSequenceExportPlan(30, frameRate);
   const canvas = document.createElement('canvas');
@@ -243,8 +287,12 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
   canvas.height = TEST_HEIGHT;
   const context = canvas.getContext('2d', { alpha: false });
   if (!context) throw new Error('The packaged renderer could not create a WebM smoke-test canvas.');
-  const offlineAudio = new OfflineAudioContext(2, 24_000, 48_000);
-  const audioBuffer = offlineAudio.createBuffer(2, 24_000, 48_000);
+  const sampleRate = 48_000;
+  const offlineAudio = new OfflineAudioContext(2, sampleRate, sampleRate);
+  const audioPulseStartSeconds = 0.25;
+  const audioPulseEndSeconds = 0.30;
+  const videoFlashFrameIndex = 8;
+  const videoFlashTimestampSeconds = plan.timestampSeconds(videoFlashFrameIndex);
   const result = await encodeDeterministicWebm({
     canvas,
     plan,
@@ -254,18 +302,39 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
     signal: new AbortController().signal,
     drawFrame: async (frameIndex) => {
       if (frameIndex % 10 === 0 || frameIndex === plan.frameCount - 1) reportProgress(`composing audio smoke frame ${frameIndex + 1}/${plan.frameCount}`);
-      context.fillStyle = frameIndex % 2 === 0 ? '#ff7418' : '#1769aa';
+      context.fillStyle = '#202020';
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.fillStyle = '#fff';
-      context.fillRect(frameIndex * 8 % canvas.width, 64, 24, 24);
+      context.fillStyle = '#1769aa';
+      context.fillRect(frameIndex * 8 % canvas.width, 100, 24, 24);
+      if (frameIndex === videoFlashFrameIndex || frameIndex === videoFlashFrameIndex + 1) {
+        context.fillStyle = '#ffffff';
+        context.fillRect(8, 8, 48, 48);
+      }
     },
-    renderAudioChunk: async () => audioBuffer,
+    renderAudioChunk: async (startSeconds, durationSeconds) => {
+      const samples = Math.max(1, Math.round(durationSeconds * sampleRate));
+      const audioBuffer = offlineAudio.createBuffer(2, samples, sampleRate);
+      const left = audioBuffer.getChannelData(0);
+      const right = audioBuffer.getChannelData(1);
+      for (let sampleIndex = 0; sampleIndex < samples; sampleIndex += 1) {
+        const timestamp = startSeconds + sampleIndex / sampleRate;
+        if (timestamp >= audioPulseStartSeconds && timestamp < audioPulseEndSeconds) {
+          const value = 0.65 * Math.sin(2 * Math.PI * 1_000 * (timestamp - audioPulseStartSeconds));
+          left[sampleIndex] = value;
+          right[sampleIndex] = value;
+        }
+      }
+      return audioBuffer;
+    },
   });
   const expectedDuration = plan.durationSeconds;
   const tolerance = plan.frameDurationSeconds;
   const videoDelta = result.measurements.outputVideoDurationSeconds - expectedDuration;
   const audioDelta = result.measurements.outputAudioDurationSeconds === null ? null : result.measurements.outputAudioDurationSeconds - expectedDuration;
   const containerDelta = result.measurements.outputContainerDurationSeconds - expectedDuration;
+  const avOffset = await measureDecodedAvOffset(result.buffer);
+  const expectedAvOffsetSeconds = audioPulseStartSeconds - videoFlashTimestampSeconds;
+  const avOffsetErrorSeconds = avOffset.audioMinusVideoOffsetSeconds - expectedAvOffsetSeconds;
   const countsMatch = areExportFrameCountsExact(plan.frameCount, {
     ...result.counts,
     outputFile: result.measurements.outputVideoFrames,
@@ -273,13 +342,17 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
   const durationsMatch = Math.abs(videoDelta) <= tolerance
     && audioDelta !== null && Math.abs(audioDelta) <= tolerance
     && Math.abs(containerDelta) <= tolerance;
+  const avOffsetMatch = Math.abs(avOffsetErrorSeconds) <= tolerance;
   return {
-    pass: countsMatch && durationsMatch,
+    pass: countsMatch && durationsMatch && avOffsetMatch,
     expected: {
       frameRate,
       frameCount: plan.frameCount,
       frameAlignedVideoDurationSeconds: expectedDuration,
       oneFrameToleranceSeconds: tolerance,
+      audioPulseStartSeconds,
+      videoFlashTimestampSeconds,
+      audioMinusVideoOffsetSeconds: expectedAvOffsetSeconds,
     },
     counts: {
       requested: result.counts.requested,
@@ -297,6 +370,8 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
       audioDurationDeltaSeconds: audioDelta,
       containerDurationSeconds: result.measurements.outputContainerDurationSeconds,
       containerDurationDeltaSeconds: containerDelta,
+      decodedAvOffset: avOffset,
+      avOffsetErrorSeconds,
       videoDimensions: { width: canvas.width, height: canvas.height },
     },
   };

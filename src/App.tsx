@@ -17,6 +17,7 @@ import { exportResolutionLabel, getExportBitrates, getExportDimensions } from '.
 import type { ExportQualityPreset, ExportResolutionPreset } from './lib/exportResolution';
 import { prepareLocalMediaFile } from './lib/localMediaImport';
 import { calculateWaveformPeaks } from './lib/audioWaveform';
+import { mapAudioPartToTimelineChunk } from './lib/timelineAudioFrames';
 import { AudioBufferSink, ALL_FORMATS, BufferSource, Input } from 'mediabunny';
 import type { WrappedAudioBuffer } from 'mediabunny';
 import { areExportFrameCountsExact, createSequenceExportPlan, encodeDeterministicWebm } from './lib/deterministicWebmExport';
@@ -1805,14 +1806,13 @@ function EditorFoundation({
           const sourceStartNeeded = clip.trimIn + activeTimelineStart - clip.start;
           reader.pending = reader.pending.filter((part) => part.timestamp + part.duration > sourceStartNeeded - 1e-7);
           for (const part of reader.pending) {
-            const partTimelineStart = clip.start + part.timestamp - clip.trimIn;
-            const partTimelineEnd = partTimelineStart + Math.min(part.duration, part.buffer.duration);
-            const mixStart = Math.max(startSeconds, clip.start, partTimelineStart);
-            const mixEnd = Math.min(chunkEnd, clipTimelineEnd, partTimelineEnd);
-            if (mixEnd <= mixStart + 1e-9) continue;
-            const sourceOffset = Math.max(0, mixStart - partTimelineStart);
-            const mixDuration = Math.min(mixEnd - mixStart, part.buffer.duration - sourceOffset);
-            if (mixDuration <= 0) continue;
+            const mixWindow = mapAudioPartToTimelineChunk(
+              clip,
+              { timestamp: part.timestamp, duration: part.duration, bufferDuration: part.buffer.duration },
+              startSeconds,
+              durationSeconds,
+            );
+            if (!mixWindow) continue;
             const sourceNode = context.createBufferSource();
             sourceNode.buffer = part.buffer;
             const gainNode = context.createGain();
@@ -1825,7 +1825,7 @@ function EditorFoundation({
               gainNode.connect(panner);
               panner.connect(context.destination);
             } else gainNode.connect(context.destination);
-            sourceNode.start(mixStart - startSeconds, sourceOffset, mixDuration);
+            sourceNode.start(mixWindow.timelineOffset, mixWindow.sourceOffset, mixWindow.duration);
           }
         }
         return context.startRendering();
