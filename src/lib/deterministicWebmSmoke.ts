@@ -187,8 +187,8 @@ const EXPECTED_IDENTITY_PLACEMENTS = [
   { startFrame: 32, endFrame: 40, sourceId: 'B' as const, sourceFrameStart: 12 },
   { startFrame: 50, endFrame: 65, sourceId: 'A' as const, sourceFrameStart: 10 },
 ];
-const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = [1, 10, 25, 34, 55, 63].map((frameIndex) => frameIndex / 30);
-const EXPECTED_FLASH_FRAME_INDEXES = [1, 10, 25, 34, 55, 63];
+const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = [1, 10, 18, 25, 34, 55, 63].map((frameIndex) => frameIndex / 30);
+const EXPECTED_FLASH_FRAME_INDEXES = [1, 10, 18, 25, 34, 55, 63];
 const AUDIO_ACTIVITY_THRESHOLD = 0.18;
 const AUDIO_ACTIVITY_GAP_SECONDS = 0.025;
 
