@@ -170,10 +170,14 @@ def main():
         raise AssertionError(f"video frame {bad} PTS error {timestamp_errors[bad]:.9f}s exceeds {video_tolerance:.9f}s")
 
     width, height = int(fixture["width"]), int(fixture["height"])
-    decoded = subprocess.run([
-        args.ffmpeg, "-v", "error", "-xerror", "-i", str(output_path), "-map", "0:v:0", "-vsync", "0",
+    video_decode = subprocess.run([
+        args.ffmpeg, "-v", "warning", "-xerror", "-i", str(output_path), "-map", "0:v:0", "-vsync", "0",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
-    ], check=True, capture_output=True).stdout
+    ], check=False, capture_output=True)
+    if video_decode.returncode != 0:
+        stderr = video_decode.stderr.decode("utf-8", errors="replace")[-6000:]
+        raise RuntimeError(f"FFmpeg full video decode failed with exit code {video_decode.returncode}: {stderr}")
+    decoded = video_decode.stdout
     bytes_per_frame = width * height * 3
     decoded_frame_count, remainder = divmod(len(decoded), bytes_per_frame)
     if remainder or decoded_frame_count != expected_count:
