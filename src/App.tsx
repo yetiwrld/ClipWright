@@ -1502,7 +1502,7 @@ export default function App() {
             {workspace !== 'home' && <button className="back-button" onClick={() => navigate('home')} aria-label="Back to projects"><ArrowLeft size={16} /></button>}
             <span className="crumb-muted">Workspace</span><span className="crumb-slash">/</span><strong>{pageTitle}</strong>
           </div>
-          <div className="head-status"><span className={`status-dot ${persistenceWarning ? 'status-warning' : ''}`} />{persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'}</div>
+          <div className="head-status" role="status" aria-live="polite" aria-label={persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'} title={persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'}><span className={`status-dot ${persistenceWarning ? 'status-warning' : ''}`} />{persistenceWarning ? 'Storage needs attention' : 'All changes saved locally'}</div>
         </div>}
 
         <main id="main-content" tabIndex={-1} className={`content-area ${workspace === 'editor' ? 'content-area-editor' : ''}`}>

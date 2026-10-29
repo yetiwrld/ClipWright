@@ -19,7 +19,7 @@ const PALETTES: Record<AppearanceTheme, Record<AccentName, AccentPalette>> = {
     violet: { accent: '#9b7bea', hover: '#b09af1', selected: '#382b53', soft: 'rgba(155,123,234,.15)', rgb: '155, 123, 234', border: 'rgba(155,123,234,.27)', ink: '#1b1428' },
   },
   light: {
-    orange: { accent: '#c84f08', hover: '#ad4205', selected: '#f9e5d8', soft: 'rgba(200,79,8,.10)', rgb: '200, 79, 8', border: 'rgba(200,79,8,.22)', ink: '#ffffff' },
+    orange: { accent: '#b03f05', hover: '#993604', selected: '#f9e5d8', soft: 'rgba(176,63,5,.10)', rgb: '176, 63, 5', border: 'rgba(176,63,5,.24)', ink: '#ffffff' },
     blue: { accent: '#28639e', hover: '#1f5489', selected: '#dceafb', soft: 'rgba(40,99,158,.11)', rgb: '40, 99, 158', border: 'rgba(40,99,158,.23)', ink: '#ffffff' },
     violet: { accent: '#6e4aa5', hover: '#5e3d91', selected: '#e9e1fb', soft: 'rgba(110,74,165,.11)', rgb: '110, 74, 165', border: 'rgba(110,74,165,.22)', ink: '#ffffff' },
   },

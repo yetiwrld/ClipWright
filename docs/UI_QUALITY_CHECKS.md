@@ -11,7 +11,7 @@ npm run qa:ui       # Vitest suite, TypeScript, and production renderer/export b
 npm run test:desktop # Electron security, project-file, export-file, and storage tests
 ```
 
-The UI suite covers appearance palettes and scale tokens, dashboard preferences, onboarding/tour navigation, and a 61-project incremental-rendering case. The desktop suite is separate so renderer-only work does not accidentally skip Electron security/storage coverage.
+The UI suite covers appearance palettes and scale tokens, dashboard preferences, onboarding/tour navigation, and a 61-project incremental-rendering case. Appearance checks also enforce at least 4.5:1 for normal semantic text, status colors, and accent text; 3:1 for disabled text and focus rings; and no explicit CSS font size below 12px. The shared type scale is 12/13/14/15px for xs/sm/md/base, with shared regular/medium/semibold/bold weights and tight/UI/normal/reading/relaxed line-height tokens. The desktop suite is separate so renderer-only work does not accidentally skip Electron security/storage coverage.
 
 ## Repeatable visual comparison
 
@@ -24,7 +24,7 @@ The UI suite covers appearance palettes and scale tokens, dashboard preferences,
 
 - **Dashboard:** no projects and welcome panel; one project; long project name; search with results and with no results; archived filter; and 61 projects (confirm the first 60 render, then “Load more projects” reveals the remainder).
 - **Editor:** empty timeline; representative video and audio clips; long media names; Help dialog; each guided-tour step; and settings open beside the editor.
-- **Appearance:** check 90%, 100%, 110%, and 125% at the supported window sizes. Check dark and light themes with orange, blue, and violet accents; verify navigation selection and timeline clip/selection/header treatments change together. Also check text contrast, focus visibility, and that semantic audio/error colors remain distinct.
+- **Appearance:** check 90%, 100%, 110%, and 125% at the supported window sizes. Check dark and light themes with orange, blue, and violet accents; verify navigation selection and timeline clip/selection/header treatments change together. Also inspect real rendered text contrast, focus visibility, and hover, selected, disabled, success, warning, and error states; ensure semantic audio/error colors remain distinct and labels are not clipped.
 - **Keyboard/reflow:** tab through dashboard controls, project actions, settings, and tour controls; verify focus is visible, Escape dismisses transient UI, and Back/Next/Skip do not trap focus. Resize the window while each major surface is open.
 
 ## Review notes
