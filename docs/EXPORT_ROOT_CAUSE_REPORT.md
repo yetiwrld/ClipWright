@@ -10,6 +10,14 @@
 4. **Confirmed CI evidence gap:** the old Windows workflow exercised real packaged WebCodecs/Mediabunny encoding for its helper-level fixtures, but did not exercise the full saved-project export service, independently inspect its output with FFmpeg/ffprobe, capture encoder configuration, or publish passing media artifacts.
 5. **Historical case remains unresolved:** repository/history/artifact-metadata searches found no original project, media, WebM or device log for 22.646 s versus 22.21 s. Download of one old diagnostics artifact failed at redirected blob storage. Audio/container tail, old real-time capture cadence, and measurement-source differences remain hypotheses, not established causes.
 
+## Latest synthetic failure investigation (run 40874579653)
+
+The packaged production export completed and passed its audio-duration smoke (`audioDurationSmokePass: true`), produced 65/65 requested, rendered, submitted, encoded, output-packet and decoded frames, monotonic timestamps, and seven audio onsets within tolerance. The identity/A/V gate still failed: it reported 19 image-oracle mismatches and detected flashes only at output frames 1, 10 and 55, while the fixture expected seven. No independent FFmpeg/ffprobe decode ran because that gate is downstream of the failing smoke.
+
+**Confirmed test-oracle defect:** the expected frame table assumed a source frame selected at `sourceFrameStart + outputFrameDelta`. That ignores the established source sampling contract: select the last decoded frame whose actual PTS is at or before the requested source time. The generated WebM source timestamps are quantized to a 1 ms track timebase, so a nominal 30 fps frame time is not always its stored PTS; at those boundaries the production reader can correctly select the preceding decoded frame. The report’s 19 mismatches and missing expected flashes are consistent with this assumption, not evidence that production frames are corrupt. The audio measurements all passed their expected onset checks; the flash oracle still needs to use markers that actually fall on sampled frames for a meaningful A/V gate.
+
+The follow-up changes make both Chromium smoke and independent Python validation derive expected source identity from separately decoded source-frame PTS and the literal fixture placement table. The generated source sync markers/pulses move to source frame indices with representable timestamps at the intended timeline sample points. This correction is **not yet verified**: the Windows production export and FFmpeg/ffprobe validator must pass on a subsequent run before claiming the smoke issue is resolved.
+
 A 667-frame sequence at 30 fps has frame-aligned duration 22.233333 s. The reported 22.646 s is 0.412667 s longer. An entered 22.21 s end time also rounds to 667 frames using the existing end-exclusive frame rule. These arithmetic observations do not reproduce the original case.
 
 ## Current implementation on this branch
@@ -24,7 +32,7 @@ A 667-frame sequence at 30 fps has frame-aligned duration 22.233333 s. The repor
 
 ## Verification and limitations
 
-The Windows workflow changes have not yet completed on this branch, so the saved-project packaged export, required-codec capability, independently decoded output, tolerance behavior, encoder-config capture, and artifact upload are pending. Local tests/build validate code and threshold arithmetic only; they cannot establish successful Windows WebCodecs behavior. The available Linux agent environment has no GUI display, FFmpeg or ffprobe.
+The saved-project packaged export has completed on Windows, but the latest run failed the original frame-identity/A/V oracle before the required independent FFmpeg/ffprobe step. CI produced and uploaded failure diagnostics, but a passing revised packaged export, independent decode, codec-capability gate, tolerance result and passing artifacts are still pending. Local tests/build validate code and threshold arithmetic only; they cannot establish successful Windows WebCodecs behavior. The available Linux agent environment has no GUI display, FFmpeg or ffprobe.
 
 The policy unit test rejects the reported 22.646 s value against a synthetic 667-frame/30 fps expectation by arithmetic only. It does **not** reproduce or resolve the historical export. Request only the original saved project, media, file and device logs if still available after the new synthetic investigation and Windows run.
 

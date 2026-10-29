@@ -66,17 +66,33 @@ jobs:
             if (Test-Path $reportPath) {
               $failed = Get-Content -Raw $reportPath | ConvertFrom-Json
               $frame = $failed.frameIdentity
+              $firstMismatch = $null
+              if ($frame.firstIncorrectFrame) {
+                $firstMismatch = [ordered]@{
+                  outputFrame = $frame.firstIncorrectFrame.outputFrame
+                  timestampErrorSeconds = $frame.firstIncorrectFrame.timestampErrorSeconds
+                  expected = $frame.firstIncorrectFrame.expected
+                  actual = $frame.firstIncorrectFrame.actual
+                }
+              }
+              $mismatchFrames = @($frame.mismatches | ForEach-Object { $_.outputFrame })
+              $actual = [ordered]@{
+                videoSyncFlashFrames = $frame.actual.videoSyncFlashFrames
+                audioOnsetMatches = $frame.actual.audioOnsetMatches
+                avSyncChecks = $frame.actual.avSyncChecks
+              }
               $short = [ordered]@{
                 audioDurationSmokePass = $failed.audioDurationSmokePass
                 frameIdentityPass = $frame.pass
                 stage = $frame.stage
                 error = $frame.error
-                expected = $frame.expected
+                expectedAudioPulseOnsetsSeconds = $frame.expected.expectedAudioPulseOnsetsSeconds
+                expectedFlashFrameIndexes = $frame.expected.expectedFlashFrameIndexes
                 counts = $frame.counts
-                actual = $frame.actual
                 mismatchCount = $frame.mismatchCount
-                firstIncorrectFrame = $frame.firstIncorrectFrame
-                mismatches = $frame.mismatches
+                mismatchFrames = $mismatchFrames
+                firstMismatch = $firstMismatch
+                actual = $actual
               }
               $details = ($short | ConvertTo-Json -Depth 8 -Compress).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Output "::error title=Packaged smoke diagnostics::$details"

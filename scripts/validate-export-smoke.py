@@ -45,21 +45,28 @@ def classify_frame(frame, width, height):
     }
 
 
-def expected_frames(fixture):
+def expected_frames(fixture, source_frame_times):
+    """Resolve the literal fixture placements against independently probed source PTS."""
     result = []
     placements = fixture["expectedPlacements"]
-    pulse_frames = {"A": {6, 15, 23}, "B": {5, 14}}
+    pulse_frames = {"A": {6, 15, 22}, "B": {4, 13}}
+    fps = float(fixture["frameRate"]["numerator"]) / float(fixture["frameRate"]["denominator"])
     for index in range(fixture["expectedFrameCount"]):
         placement = next((entry for entry in placements if entry["startFrame"] <= index < entry["endFrame"]), None)
         if placement is None:
             result.append({"sourceId": None, "frameIndex": None, "isGap": True, "hasSyncFlash": False})
         else:
-            source_index = placement["sourceFrameStart"] + index - placement["startFrame"]
+            requested_source_time = placement["sourceFrameStart"] / fps + (index - placement["startFrame"]) / fps
+            decoded_source_index = None
+            for source_index, source_time in enumerate(source_frame_times[placement["sourceId"]]):
+                if source_time > requested_source_time + 1e-6:
+                    break
+                decoded_source_index = source_index
             result.append({
-                "sourceId": placement["sourceId"],
-                "frameIndex": source_index,
-                "isGap": False,
-                "hasSyncFlash": source_index in pulse_frames[placement["sourceId"]],
+                "sourceId": placement["sourceId"] if decoded_source_index is not None else None,
+                "frameIndex": decoded_source_index,
+                "isGap": decoded_source_index is None,
+                "hasSyncFlash": decoded_source_index in pulse_frames[placement["sourceId"]] if decoded_source_index is not None else False,
             })
     return result
 
@@ -98,12 +105,18 @@ def main():
     frame_period = 1.0 / fps
     opus_duration = float(fixture["timingPolicy"]["opusPacketDurationSeconds"])
     source_checks = {}
+    source_frame_times = {}
     for source_id in ("A", "B"):
         source_path = root / f"source-{source_id}.webm"
         source_meta = run_json(args.ffprobe, ["-v", "error", "-show_streams", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=codec_name,nb_read_frames", "-of", "json", str(source_path)])
         source_streams = source_meta.get("streams", [])
         if not source_streams or int(source_streams[0].get("nb_read_frames", 0)) != 30:
             raise AssertionError(f"Independent ffprobe source {source_id} check did not find 30 frames")
+        source_frames = run_json(args.ffprobe, ["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(source_path)]).get("frames", [])
+        times = [float(frame["best_effort_timestamp_time"]) for frame in source_frames if "best_effort_timestamp_time" in frame]
+        if len(times) != 30 or any(right <= left for left, right in zip(times, times[1:])):
+            raise AssertionError(f"Independent ffprobe source {source_id} PTS are missing or non-monotonic")
+        source_frame_times[source_id] = times
         source_audio = run_json(args.ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate", "-of", "json", str(source_path)]).get("streams", [])
         if not source_audio or source_audio[0].get("codec_name") != "opus" or int(source_audio[0].get("sample_rate", 0)) != 48_000:
             raise AssertionError(f"Independent ffprobe source {source_id} check found no 48 kHz Opus audio")
@@ -166,7 +179,7 @@ def main():
     if remainder or decoded_frame_count != expected_count:
         raise AssertionError(f"FFmpeg full decode produced {decoded_frame_count} frames with {remainder} trailing bytes; expected {expected_count}")
     actual_frames = [classify_frame(decoded[index * bytes_per_frame:(index + 1) * bytes_per_frame], width, height) for index in range(expected_count)]
-    expected = expected_frames(fixture)
+    expected = expected_frames(fixture, source_frame_times)
     mismatches = [
         {"frameIndex": index, "timestampSeconds": frame_times[index], "expected": expected[index], "actual": actual_frames[index]}
         for index in range(expected_count) if expected[index] != actual_frames[index]

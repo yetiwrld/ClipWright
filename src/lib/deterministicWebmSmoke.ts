@@ -18,8 +18,8 @@ const TEST_WIDTH = 320;
 const TEST_HEIGHT = 180;
 const IDENTITY_BIT_COUNT = 6;
 const IDENTITY_AUDIO_PULSES = {
-  A: [{ frameIndex: 6, frequencyHz: 440 }, { frameIndex: 15, frequencyHz: 440 }, { frameIndex: 23, frequencyHz: 440 }],
-  B: [{ frameIndex: 5, frequencyHz: 660 }, { frameIndex: 14, frequencyHz: 660 }],
+  A: [{ frameIndex: 6, frequencyHz: 440 }, { frameIndex: 15, frequencyHz: 440 }, { frameIndex: 22, frequencyHz: 440 }],
+  B: [{ frameIndex: 4, frequencyHz: 660 }, { frameIndex: 13, frequencyHz: 660 }],
 } as const;
 type SmokeProgress = (stage: string) => void;
 const reportNoop: SmokeProgress = () => undefined;
@@ -187,8 +187,8 @@ const EXPECTED_IDENTITY_PLACEMENTS = [
   { startFrame: 32, endFrame: 40, sourceId: 'B' as const, sourceFrameStart: 12 },
   { startFrame: 50, endFrame: 65, sourceId: 'A' as const, sourceFrameStart: 10 },
 ];
-const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = [1, 10, 18, 25, 34, 55, 63].map((frameIndex) => frameIndex / 30);
-const EXPECTED_FLASH_FRAME_INDEXES = [1, 10, 18, 25, 34, 55, 63];
+const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = [1, 10, 17, 24, 33, 55, 62].map((frameIndex) => frameIndex / 30);
+const EXPECTED_FLASH_FRAME_INDEXES = [1, 10, 17, 24, 33, 55, 62];
 const AUDIO_ACTIVITY_THRESHOLD = 0.18;
 const AUDIO_ACTIVITY_GAP_SECONDS = 0.025;
 
@@ -244,6 +244,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     sourceA = await encodeIdentitySource('A', reportProgress);
     sourceB = await encodeIdentitySource('B', reportProgress);
     const sourceBuffers = new Map<'A' | 'B', ArrayBuffer>([['A', sourceA], ['B', sourceB]]);
+    const decodedSourceFrames = new Map<'A' | 'B', TimedFrameIdentity[]>();
     for (const [sourceId, sourceBuffer] of sourceBuffers) {
       const decoded = await inspectFrameIdentities(sourceBuffer, reportProgress, `synthetic source ${sourceId}`);
       const sourcePulses = IDENTITY_AUDIO_PULSES[sourceId];
@@ -253,6 +254,7 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
       if (decoded.length !== 30 || invalidSourceFrame) {
         throw new Error(`Synthetic source ${sourceId} is not a complete 30-frame video/audio fixture; decoded=${decoded.length}, firstBad=${JSON.stringify(invalidSourceFrame ?? null)}.`);
       }
+      decodedSourceFrames.set(sourceId, decoded);
     }
 
     stage = 'serializing and validating saved project snapshot';
@@ -313,14 +315,15 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
     const expectedFrameIdentities: FrameIdentity[] = Array.from({ length: plan.frameCount }, (_, frameIndex) => {
       const placement = EXPECTED_IDENTITY_PLACEMENTS.find(({ startFrame, endFrame }) => frameIndex >= startFrame && frameIndex < endFrame);
       if (!placement) return { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
-      const sourceFrameIndex = placement.sourceFrameStart + frameIndex - placement.startFrame;
-      const sourcePulses = IDENTITY_AUDIO_PULSES[placement.sourceId];
-      return {
-        sourceId: placement.sourceId,
-        frameIndex: sourceFrameIndex,
-        isGap: false,
-        hasSyncFlash: sourcePulses.some((pulse) => pulse.frameIndex === sourceFrameIndex),
-      };
+      const requestedSourceTime = placement.sourceFrameStart / TEST_RATE.numerator
+        + (frameIndex - placement.startFrame) / TEST_RATE.numerator;
+      const decodedSource = decodedSourceFrames.get(placement.sourceId) ?? [];
+      let expectedSourceFrame: TimedFrameIdentity | undefined;
+      for (const sourceFrame of decodedSource) {
+        if (sourceFrame.timestampSeconds > requestedSourceTime + 1 / 1_000_000) break;
+        expectedSourceFrame = sourceFrame;
+      }
+      return expectedSourceFrame?.identity ?? { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
     });
     const timestampToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / result.measurements.videoTimeResolution);
     const mismatches = expectedFrameIdentities.flatMap((expected, index) => {
