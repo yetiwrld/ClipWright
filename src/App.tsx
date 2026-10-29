@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, ArrowLeft, ArrowRight, ArrowLeftRight, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Download,
+  Archive, ArrowLeft, ArrowRight, ArrowLeftRight, Check, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Download,
   CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen, Image as ImageIcon,
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
-  Grid2X2, HardDrive, Heart, Home, Keyboard, ListFilter, Maximize2,
+  Grid2X2, HardDrive, Heart, Home, Keyboard, Maximize2,
   MoreHorizontal, Minimize2, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut, Scissors, Magnet,
   Eye, EyeOff, History, Lock, LockOpen, Save,
   X, type LucideIcon,
@@ -19,6 +19,7 @@ import { prepareLocalMediaFile } from './lib/localMediaImport';
 import { calculateWaveformPeaks } from './lib/audioWaveform';
 import { DEFAULT_EDITOR_PREFERENCES, readEditorPreferences, writeEditorPreferences } from './lib/preferences';
 import type { EditorPreferences } from './lib/preferences';
+import { applyAppearance } from './lib/appearance';
 import { selectActiveVideoClip } from './lib/timelineVideoFrames';
 import { exportTimelineProject, type TimelineExportResult } from './lib/timelineExport';
 import { checkMp4EncodingSupport } from './lib/deterministicWebmExport';
@@ -32,6 +33,19 @@ type Workspace = 'home' | 'clipping' | 'editor';
 type Toast = { id: number; message: string; kind?: 'error' | 'success' | 'warning' };
 type ManagedProjectFile = { handle: string; fileName: string };
 type DiskSaveState = 'saving' | 'saved' | 'error';
+type ProjectSort = 'recent' | 'name' | 'oldest';
+const PROJECTS_VIEW_KEY = 'clipwright.projects.view.v1';
+
+function readProjectView() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(PROJECTS_VIEW_KEY) ?? '{}');
+    return {
+      query: typeof stored.query === 'string' ? stored.query.slice(0, 120) : '',
+      archived: stored.archived === true,
+      sort: (['recent', 'name', 'oldest'].includes(stored.sort) ? stored.sort : 'recent') as ProjectSort,
+    };
+  } catch { return { query: '', archived: false, sort: 'recent' as ProjectSort }; }
+}
 
 const workspaceItems: { id: Workspace; label: string; icon: LucideIcon }[] = [
   { id: 'home', label: 'Home', icon: Home },
@@ -164,6 +178,11 @@ export default function App() {
   const [editorNavCollapsed, setEditorNavCollapsed] = useState(true);
   const [editorFocusMode, setEditorFocusMode] = useState(false);
   const [initialProjectStore] = useState(() => readProjectStore(window.localStorage));
+  const [welcomeComplete, setWelcomeComplete] = useState(() => {
+    if (initialProjectStore.projects.length) return true;
+    try { return window.localStorage.getItem('clipwright.onboarding.completed.v1') === 'true'; }
+    catch { return false; }
+  });
   const [projects, setProjects] = useState<Project[]>(initialProjectStore.projects);
   const [storageWarning, setStorageWarning] = useState(initialProjectStore.issue);
   const [initialDocumentStore] = useState(() => readProjectDocuments(window.localStorage));
@@ -194,8 +213,13 @@ export default function App() {
   const [showCommands, setShowCommands] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const [showArchived, setShowArchived] = useState(false);
-  const [query, setQuery] = useState('');
+  const [showGuidedTour, setShowGuidedTour] = useState(false);
+  const [projectRenderLimit, setProjectRenderLimit] = useState(60);
+  const [projectView, setProjectView] = useState(readProjectView);
+  const { archived: showArchived, query, sort: projectSort } = projectView;
+  const setShowArchived = (archived: boolean | ((current: boolean) => boolean)) => setProjectView((current) => ({ ...current, archived: typeof archived === 'function' ? archived(current.archived) : archived }));
+  const setQuery = (nextQuery: string) => setProjectView((current) => ({ ...current, query: nextQuery }));
+  const setProjectSort = (sort: ProjectSort) => setProjectView((current) => ({ ...current, sort }));
   const [toast, setToast] = useState<Toast | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('clipwright.theme') === 'light' ? 'light' : 'dark');
   const [preferences, setPreferences] = useState<EditorPreferences>(() => readEditorPreferences(window.localStorage));
@@ -227,10 +251,21 @@ export default function App() {
   const editorAspectRatio = activeSequence ? aspectRatioOf(activeSequence.width, activeSequence.height) : activeProject?.aspectRatio ?? '16:9';
   const editorFrameRate = activeSequence ? formatFrameRate(activeSequence.frameRate.numerator / activeSequence.frameRate.denominator) : formatFrameRate(activeProject?.frameRate ?? 30);
   const persistenceWarning = storageWarning ?? documentStorageWarning ?? (persistentStorageIssue ? 'storage-unavailable' as const : null);
+  useEffect(() => { if (workspace !== 'editor') setShowGuidedTour(false); }, [workspace]);
+
   const visibleProjects = useMemo(() => projects
     .filter((project) => project.archived === showArchived)
     .filter((project) => project.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
-    .sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.updatedAt.localeCompare(a.updatedAt)), [projects, query, showArchived]);
+    .sort((a, b) => {
+      const favoriteOrder = Number(b.favorite) - Number(a.favorite);
+      if (favoriteOrder) return favoriteOrder;
+      if (projectSort === 'name') return a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+      if (projectSort === 'oldest') return a.createdAt.localeCompare(b.createdAt);
+      return b.updatedAt.localeCompare(a.updatedAt);
+    }), [projects, query, showArchived, projectSort]);
+  const displayedProjects = visibleProjects.slice(0, projectRenderLimit);
+
+  useEffect(() => { setProjectRenderLimit(60); }, [query, showArchived, projectSort]);
 
   function handleProjectTabsKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
@@ -348,6 +383,11 @@ export default function App() {
     try { window.localStorage.setItem('clipwright.workspace.last-project', activeProjectId); }
     catch { /* Last-opened restoration is optional when profile storage is unavailable. */ }
   }, [activeProjectId]);
+
+  useEffect(() => {
+    try { window.localStorage.setItem(PROJECTS_VIEW_KEY, JSON.stringify(projectView)); }
+    catch { /* Project filters remain usable for this session if profile storage is blocked. */ }
+  }, [projectView]);
 
   useEffect(() => {
     const library = window.clipwright?.library;
@@ -482,18 +522,7 @@ export default function App() {
   useEffect(() => {
     try { writeEditorPreferences(window.localStorage, preferences); }
     catch { /* Editing remains available for this session when storage is blocked. */ }
-    const root = document.documentElement;
-    root.style.zoom = `${preferences.appearance.uiScale}%`;
-    const accents = {
-      orange: { accent: theme === 'light' ? '#d95808' : '#ff7418', hover: theme === 'light' ? '#eb6817' : '#ff8735', selected: theme === 'light' ? '#f9e5d8' : '#522b18', soft: theme === 'light' ? 'rgba(217,88,8,.1)' : 'rgba(255,116,24,.12)' },
-      blue: { accent: '#4b91e2', hover: '#6aa5ee', selected: theme === 'light' ? '#dceafb' : '#1f3854', soft: 'rgba(75,145,226,.13)' },
-      violet: { accent: '#9b7bea', hover: '#b09af1', selected: theme === 'light' ? '#e9e1fb' : '#382b53', soft: 'rgba(155,123,234,.14)' },
-    } as const;
-    const accent = accents[preferences.appearance.accent];
-    root.style.setProperty('--accent', accent.accent);
-    root.style.setProperty('--accent-hover', accent.hover);
-    root.style.setProperty('--accent-selected', accent.selected);
-    root.style.setProperty('--accent-soft', accent.soft);
+    applyAppearance(document.documentElement, theme, preferences.appearance.accent, preferences.appearance.uiScale as 90 | 100 | 110 | 125);
   }, [preferences, theme]);
 
   useEffect(() => () => {
@@ -520,6 +549,12 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [persistenceWarning, workspace, activeProject, documents, managedProjectFiles, isRestoringRecovery]);
+
+  function completeWelcome() {
+    setWelcomeComplete(true);
+    try { window.localStorage.setItem('clipwright.onboarding.completed.v1', 'true'); }
+    catch { /* Welcome remains dismissed for this session if profile storage is unavailable. */ }
+  }
 
   function notify(message: string, kind: Toast['kind'] = 'success') {
     const id = Date.now();
@@ -649,6 +684,7 @@ export default function App() {
       setDiskSaveStates((current) => ({ ...current, [project.id]: 'saved' }));
       setActiveProjectId(project.id);
       setWorkspace('editor');
+      completeWelcome();
       notify(`Opened ${result.fileName}. Future changes will autosave to this file.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not open this project file.', 'error');
@@ -1113,6 +1149,7 @@ export default function App() {
       setProjects((current) => [project, ...current]);
       setActiveProjectId(project.id);
       setWorkspace('editor');
+      completeWelcome();
       setShowCreate(false);
       notify(`Created “${project.name}”.`);
     } catch (error) {
@@ -1219,6 +1256,7 @@ export default function App() {
       setDocuments((current) => [...current, importedDocument]);
       setActiveProjectId(project.id);
       setWorkspace('editor');
+      completeWelcome();
       notify(idConflict ? 'Opened as a separate project copy to protect the existing project.' : `Opened “${project.name}”.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not open this project file.', 'error');
@@ -1229,6 +1267,7 @@ export default function App() {
     setProjects((current) => current.map((item) => item.id === project.id ? { ...item, updatedAt: new Date().toISOString() } : item));
     setActiveProjectId(project.id);
     setWorkspace('editor');
+    completeWelcome();
   }
 
   function updateProject(id: string, patch: Partial<Project>): boolean {
@@ -1432,7 +1471,7 @@ export default function App() {
             </div>
           </div> : <div className="brand-title"><span className="wordmark">ClipWright</span><span className="brand-studio">STUDIO</span><span className="version-tag">EARLY ACCESS</span></div>}
           <div className="topbar-actions">
-            {workspace === 'home' && <div className="top-search"><Search size={15} /><input aria-label="Search projects" placeholder="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>⌘ K</kbd></div>}
+            {workspace === 'home' && <div className="top-search"><Search size={15} /><input aria-label="Search projects" placeholder="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} />{query ? <button type="button" className="search-clear" aria-label="Clear project search" onClick={() => setQuery('')}><X size={13} /></button> : <kbd>⌘ K</kbd>}</div>}
             {workspace === 'editor' && <>
               <div className="topbar-action-group" role="group" aria-label="Project file actions">
                 <button className="topbar-labeled-action" type="button" aria-label="Save project" title={managedProjectFiles[activeProjectId ?? ''] ? 'Save project (Ctrl+S)' : 'Save project as a .cwproject file'} onClick={() => { if (activeProject) void saveProjectFile(activeProject.id); }} disabled={!activeProject || !!persistenceWarning}><Save size={15} /><span>Save</span></button>
@@ -1479,20 +1518,44 @@ export default function App() {
                   <button id="recent-projects-tab" role="tab" aria-controls="projects-filter-panel" aria-selected={!showArchived} tabIndex={showArchived ? -1 : 0} className={!showArchived ? 'selected' : ''} onClick={() => setShowArchived(false)}>Recent <span className="tab-count">{projects.filter((p) => !p.archived).length}</span></button>
                   <button id="archived-projects-tab" role="tab" aria-controls="projects-filter-panel" aria-selected={showArchived} tabIndex={showArchived ? 0 : -1} className={showArchived ? 'selected' : ''} onClick={() => setShowArchived(true)}>Archived <span className="tab-count">{projects.filter((p) => p.archived).length}</span></button>
                 </div>
-                <button className="filter-button" onClick={() => setShowArchived((value) => !value)} title="Toggle archived projects"><ListFilter size={15} /><span>{showArchived ? 'Show recent' : 'Filter'}</span><ChevronDown size={13} /></button>
+                <div className="project-list-controls">
+                  <span className="project-result-count" aria-live="polite">{visibleProjects.length} {showArchived ? 'archived ' : ''}{visibleProjects.length === 1 ? 'project' : 'projects'}{query ? ' found' : ''}</span>
+                  <label className="project-sort-control"><span>Sort by</span><select aria-label="Sort projects" className="select-input" value={projectSort} onChange={(event) => setProjectSort(event.target.value as ProjectSort)}><option value="recent">Recently edited</option><option value="name">Name</option><option value="oldest">Oldest first</option></select></label>
+                </div>
               </div>
               <div id="projects-filter-panel" role="tabpanel" aria-labelledby={showArchived ? 'archived-projects-tab' : 'recent-projects-tab'} tabIndex={0}>
               {visibleProjects.length > 0 ? (
+                <>
                 <div className="project-grid">
-                  {visibleProjects.map((project, index) => <ProjectCard key={project.id} project={project} index={index} onOpen={() => openProject(project)} onRename={() => {
+                  {displayedProjects.map((project, index) => <ProjectCard key={project.id} project={project} index={index} onOpen={() => openProject(project)} onRename={() => {
                     const name = window.prompt('Rename project', project.name);
                     if (name?.trim() && updateProject(project.id, { name: name.trim() })) notify('Project renamed.');
                   }} onDuplicate={() => duplicateProject(project)} onArchive={() => { updateProject(project.id, { archived: !project.archived }); notify(project.archived ? 'Project restored.' : 'Project archived.'); }} onFavorite={() => updateProject(project.id, { favorite: !project.favorite })} onDelete={() => deleteProject(project)} onDownload={() => downloadProjectFile(project)} />)}
                 </div>
+                {visibleProjects.length > projectRenderLimit && <div className="project-load-more"><span>Showing {displayedProjects.length} of {visibleProjects.length}</span><button type="button" className="button button-secondary button-small" onClick={() => setProjectRenderLimit((limit) => Math.min(visibleProjects.length, limit + 60))}>Load more projects</button></div>}
+                </>
               ) : query ? (
                 <div className="empty-state compact-empty"><div className="empty-icon"><Search size={20} /></div><h2>No projects found</h2><p>Try another search term or clear the search.</p><button className="button button-secondary" onClick={() => setQuery('')}>Clear search</button></div>
               ) : showArchived ? (
                 <div className="empty-state compact-empty"><div className="empty-icon"><Archive size={20} /></div><h2>No archived projects</h2><p>Archived project entries will appear here. Source media is never removed by archiving.</p></div>
+              ) : !welcomeComplete && !isStorageRestoring && desktopLibraryReady && !persistenceWarning ? (
+                <section className="first-run-welcome" aria-labelledby="first-run-title">
+                  <div className="welcome-icon"><Clapperboard size={23} /></div>
+                  <div className="eyebrow">WELCOME TO CLIPWRIGHT STUDIO</div>
+                  <h2 id="first-run-title">Start with a project, not a setup wizard.</h2>
+                  <p>Build a local timeline, bring in video or audio, and export when your browser supports the selected format. Your original media is not changed.</p>
+                  <ul>
+                    <li><strong>Create a project</strong><span>Choose canvas dimensions and frame rate.</span></li>
+                    <li><strong>Import media</strong><span>Keep a managed copy here or link to the original file.</span></li>
+                    <li><strong>Edit and export</strong><span>Use the timeline tools, then check format support in Export.</span></li>
+                  </ul>
+                  <div className="first-run-actions">
+                    <button className="button button-primary" onClick={() => setShowCreate(true)} disabled={!!persistenceWarning}><Plus size={16} />Create your first project</button>
+                    <button className="button button-secondary" onClick={requestProjectFile} disabled={!!persistenceWarning}><Upload size={15} />Open existing project</button>
+                    <button className="button button-ghost" onClick={completeWelcome}>Skip onboarding</button>
+                  </div>
+                  <span className="first-run-note"><HardDrive size={13} />{window.clipwright?.library ? 'Your project library stays on this device.' : 'Your browser profile stores project documents.'} No sample project is included.</span>
+                </section>
               ) : (
                 <div className="empty-state">
                   <div className="empty-art"><div className="art-window"><div className="art-topline" /><div className="art-preview"><Film size={28} strokeWidth={1.2} /></div><div className="art-timeline"><i /><i /><i /></div></div><span className="art-spark spark-one" /><span className="art-spark spark-two" /></div>
@@ -1571,7 +1634,8 @@ export default function App() {
         onReset={() => { updatePreferences(() => structuredClone(DEFAULT_EDITOR_PREFERENCES)); setTheme('dark'); }}
         onClose={() => setShowSettings(false)}
       />}
-      {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
+      {showHelp && <HelpDialog canTour={workspace === 'editor' && Boolean(activeProject)} onStartTour={() => { setShowHelp(false); setShowGuidedTour(true); }} onClose={() => setShowHelp(false)} />}
+      {showGuidedTour && workspace === 'editor' && <GuidedTour onClose={() => setShowGuidedTour(false)} />}
       {showCommands && <CommandDialog inputRef={searchRef} onClose={() => setShowCommands(false)} actions={[
         { label: 'Create a new project', shortcut: 'Ctrl+N', icon: FilePlus2, run: () => { setShowCommands(false); if (persistenceWarning) notify('Resolve the project storage warning before creating a project.', 'error'); else setShowCreate(true); } },
         { label: 'Open a project file', icon: Upload, run: () => { setShowCommands(false); requestProjectFile(); } },
@@ -3143,7 +3207,7 @@ function EditorFoundation({
     {missingMediaAssets.length > 0 && <div className="missing-media-banner" role="alert"><div><strong>{missingMediaAssets.length} missing media {missingMediaAssets.length === 1 ? 'file' : 'files'}</strong><span>Offline clips are marked on the timeline. Relink each source before exporting; export is disabled while media is missing.</span></div><button className="button button-secondary button-small" type="button" onClick={() => { const asset = missingMediaAssets[0]; if (asset.kind === 'audio') onRelinkAudio(asset.id); else onRelinkVideo(asset.id); }} disabled={isReadingMedia}><Upload size={14} />Relink {missingMediaAssets[0].name}</button></div>}
     <div className="editor-layout" ref={editorLayoutRef}>
       <div className={`editor-main-row${mediaPanelCollapsed ? ' media-panel-collapsed' : ''}${propertiesPanelCollapsed ? ' properties-panel-collapsed' : ''}`} style={{ '--media-panel-width': `${mediaPanelWidth}px`, '--properties-panel-width': `${propertiesPanelWidth}px` } as React.CSSProperties}>
-        <aside className={`editor-media-panel${mediaPanelCollapsed ? ' is-collapsed' : ''}`} aria-label="Project media" aria-busy={isReadingMedia}>
+        <aside className={`editor-media-panel${mediaPanelCollapsed ? ' is-collapsed' : ''}`} aria-label="Project media" data-tour="media-bin" aria-busy={isReadingMedia}>
           <div className="panel-title">
             {!mediaPanelCollapsed && <span>Project media</span>}
             <div className="panel-title-tools">
@@ -3189,7 +3253,7 @@ function EditorFoundation({
         </aside>
         <div className="panel-resize-handle" role="separator" aria-label="Resize Project media panel" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={420} aria-valuenow={mediaPanelWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize(event, 'media')} onPointerMove={movePanelResize} onPointerUp={endPanelResize} onPointerCancel={endPanelResize} onKeyDown={(event) => handlePanelResizeKey(event, 'media')}><span /></div>
         <div className="editor-center">
-          <div className="preview-stage">{focusMode && <button className="preview-focus-exit" type="button" aria-label="Exit focus mode" title="Exit focus mode (Esc)" onClick={onToggleFocusMode}><Minimize2 size={15} /><span>Exit focus mode</span></button>}<div className="preview-frame" style={{ aspectRatio: `${sequence?.width ?? 16} / ${sequence?.height ?? 9}`, width: 'auto', height: '100%', backgroundColor: sequence?.canvasBackground ?? '#000000' }}>
+          <div className="preview-stage">{focusMode && <button className="preview-focus-exit" type="button" aria-label="Exit focus mode" title="Exit focus mode (Esc)" onClick={onToggleFocusMode}><Minimize2 size={15} /><span>Exit focus mode</span></button>}<div className="preview-frame" data-tour="preview" style={{ aspectRatio: `${sequence?.width ?? 16} / ${sequence?.height ?? 9}`, width: 'auto', height: '100%', backgroundColor: sequence?.canvasBackground ?? '#000000' }}>
             <video ref={videoARef} className={`preview-video${activeDeck === 0 && timelineVideoVisible && deckReady[0] ? ' is-active' : ''}`} src={deckUrls[0] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[0])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 0} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} onLoadedMetadata={() => handlePreviewMetadata(0)} onLoadedData={() => handlePreviewReady(0)} onCanPlay={() => handlePreviewReady(0)} onPlay={() => { playRequestRef.current[0] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
             <video ref={videoBRef} className={`preview-video${activeDeck === 1 && timelineVideoVisible && deckReady[1] ? ' is-active' : ''}`} src={deckUrls[1] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[1])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 1} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} onLoadedMetadata={() => handlePreviewMetadata(1)} onLoadedData={() => handlePreviewReady(1)} onCanPlay={() => handlePreviewReady(1)} onPlay={() => { playRequestRef.current[1] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
             {audioClips.map((clip) => {
@@ -3215,7 +3279,7 @@ function EditorFoundation({
           </div>
         </div>
         <div className="panel-resize-handle" role="separator" aria-label="Resize Properties panel" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={440} aria-valuenow={propertiesPanelWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize(event, 'properties')} onPointerMove={movePanelResize} onPointerUp={endPanelResize} onPointerCancel={endPanelResize} onKeyDown={(event) => handlePanelResizeKey(event, 'properties')}><span /></div>
-        <aside className={`properties-panel${propertiesPanelCollapsed ? ' is-collapsed' : ''}`} aria-label="Properties">
+        <aside className={`properties-panel${propertiesPanelCollapsed ? ' is-collapsed' : ''}`} aria-label="Properties" data-tour="properties">
           <div className="panel-title">{!propertiesPanelCollapsed && <span>Properties</span>}<button className="icon-button small" type="button" aria-label={propertiesPanelCollapsed ? 'Expand Properties panel' : 'Collapse Properties panel'} aria-expanded={!propertiesPanelCollapsed} title={propertiesPanelCollapsed ? 'Expand Properties panel' : 'Collapse Properties panel'} onClick={() => { setPropertiesPanelCollapsed((collapsed) => { const next = !collapsed; try { window.localStorage.setItem('clipwright.workspace.properties-collapsed', String(next)); } catch { /* Panel remains resizable for this session. */ } return next; }); }}>{propertiesPanelCollapsed ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}</button></div>
           {!propertiesPanelCollapsed && <div className="properties-body">
             {sequence && <ProjectCanvasSettings sequence={sequence} onApply={applyCanvasSettings} />}
@@ -3256,7 +3320,7 @@ function EditorFoundation({
         </aside>
       </div>
       <div className="timeline-resize-handle" role="separator" aria-label="Resize preview and timeline" aria-orientation="horizontal" aria-valuemin={timelineMinHeight} aria-valuemax={timelineMaxHeight} aria-valuenow={effectiveTimelineHeight} aria-valuetext={`${previewHeightPercent}% preview height`} tabIndex={0} onPointerDown={beginTimelineResize} onPointerMove={moveTimelineResize} onPointerUp={endTimelineResize} onPointerCancel={endTimelineResize} onKeyDown={handleTimelineResizeKey}><span /></div>
-      <div className="timeline-panel" style={{ height: effectiveTimelineHeight }}>
+      <div className="timeline-panel" data-tour="timeline" style={{ height: effectiveTimelineHeight }}>
         <div className="timeline-heading">
           <div><span className="panel-kicker">TIMELINE</span><span className="timeline-sequence">{sequence?.name ?? 'Sequence 01'}</span></div>
           <div className="timeline-tools" role="group" aria-label="Timeline editing tools">
@@ -3650,7 +3714,44 @@ function SettingsDialog({
   </div>;
 }
 
-function HelpDialog({ onClose }: { onClose: () => void }) {
+const EDITOR_TOUR_STEPS = [
+  { selector: '[data-tour="media-bin"]', title: 'Project media', description: 'Import video and audio here. Managed assets are copied into the project library; linked assets stay at their original location.' },
+  { selector: '[data-tour="preview"]', title: 'Preview', description: 'The preview follows the playhead and sequence canvas. Use the transport controls to review your edit.' },
+  { selector: '[data-tour="timeline"]', title: 'Timeline', description: 'Drag media onto a compatible track, then select clips to move, trim, split, or remove them.' },
+  { selector: '[data-tour="properties"]', title: 'Properties', description: 'Inspect the selected clip and adjust supported timing or audio settings. Export settings remain available from the Export action.' },
+] as const;
+
+function GuidedTour({ onClose }: { onClose: () => void }) {
+  const [stepIndex, setStepIndex] = useState(0);
+  const [targetUnavailable, setTargetUnavailable] = useState(false);
+  const step = EDITOR_TOUR_STEPS[stepIndex];
+  useEffect(() => {
+    const target = document.querySelector<HTMLElement>(step.selector);
+    if (!target) { setTargetUnavailable(true); return; }
+    target.dataset.tourActive = 'true';
+    target.scrollIntoView?.({ block: 'nearest', behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    const bounds = target.getBoundingClientRect();
+    setTargetUnavailable(bounds.width === 0 || bounds.height === 0);
+    return () => { delete target.dataset.tourActive; };
+  }, [step]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); finishTour(); } };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+  function finishTour() {
+    try { window.localStorage.setItem('clipwright.onboarding.tour-reviewed.v1', 'true'); }
+    catch { /* The guided tour remains dismissible if profile storage is unavailable. */ }
+    onClose();
+  }
+  return <aside className="guided-tour-card" aria-label="Guided editor tour" aria-live="polite">
+    <div className="guided-tour-progress"><span>EDITOR TOUR · STEP {stepIndex + 1} OF {EDITOR_TOUR_STEPS.length}</span><button type="button" className="icon-button small" aria-label="Close guided tour" onClick={finishTour}><X size={14} /></button></div>
+    <h2>{step.title}</h2><p>{targetUnavailable ? 'This area is hidden in the current layout. You can continue the tour or change the panel layout later.' : step.description}</p>
+    <div className="guided-tour-actions"><button type="button" className="button button-ghost" onClick={finishTour}>Skip tour</button><span />{stepIndex > 0 && <button type="button" className="button button-secondary button-small" onClick={() => setStepIndex((current) => current - 1)}>Back</button>}{stepIndex < EDITOR_TOUR_STEPS.length - 1 ? <button type="button" className="button button-primary button-small" onClick={() => setStepIndex((current) => current + 1)}>Next</button> : <button type="button" className="button button-primary button-small" onClick={finishTour}>Finish</button>}</div>
+  </aside>;
+}
+
+function HelpDialog({ onClose, canTour, onStartTour }: { onClose: () => void; canTour: boolean; onStartTour: () => void }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useDialogFocusTrap<HTMLElement>(() => closeButtonRef.current);
   return <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -3658,6 +3759,10 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
       <div className="dialog-head"><div className="dialog-icon"><CircleHelp size={17} /></div><button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} aria-label="Close help"><X size={17} /></button></div>
       <div className="eyebrow">QUICK REFERENCE</div><h2 id="help-title">Keyboard shortcuts</h2>
       <p className="dialog-copy">Shortcuts are available while editing. Focused controls keep their normal keyboard behavior.</p>
+      <section className="help-getting-started" aria-labelledby="help-started-title">
+        <div><h3 id="help-started-title">Getting started</h3><p>Create or open a project, import video or audio, drag a clip to its matching track, then preview and export. Image files can be stored in the media bin; image timeline clips are not available yet.</p></div>
+        <button type="button" className="button button-secondary button-small" onClick={onStartTour} disabled={!canTour} title={!canTour ? 'Open a project in the Editor to start the tour.' : 'Tour the media bin, preview, timeline, and properties.'}>Start editor tour</button>
+      </section>
       <div className="help-shortcut-grid">
         <section className="help-shortcut-group"><h3>Workspace</h3><dl>
           <div><dt>Command palette</dt><dd><kbd>Ctrl/Cmd</kbd><kbd>K</kbd></dd></div>
@@ -3683,7 +3788,7 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
           <div><dt>Jump to trim limit</dt><dd><kbd>Home</kbd><kbd>End</kbd></dd></div>
         </dl></section>
       </div>
-      <p className="help-disclaimer">The Windows preview supports managed project saves and recovery checkpoints. AI analysis and offline desktop rendering are not included; browser WebM export uses deterministic frame-index timestamps, but target-device quality is unverified.</p>
+      <p className="help-disclaimer">Media remains local. Linked sources may need relinking if they move. Export format support is checked on this device, but source codecs and performance can vary.</p>
     </section>
   </div>;
 }

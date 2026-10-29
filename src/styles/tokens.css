@@ -11,7 +11,7 @@
   --bg-elevated: #1d1e21;
   --bg-hover: #242528;
   --bg-input: #121315;
-  --bg-timeline-header: #211d1a;
+  --bg-timeline-header: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
   --bg-timeline-canvas: #101113;
   --border: #2b2c2f;
   --border-soft: #232427;
@@ -19,7 +19,11 @@
   --text-secondary: #a4a4a2;
   --text-muted: #747573;
   --text-disabled: #545553;
+  --ui-scale: 1;
   --accent: #ff7418;
+  --accent-rgb: 255, 116, 24;
+  --accent-border: rgba(255, 116, 24, .22);
+  --accent-ink: #20130c;
   --accent-hover: #ff8735;
   --accent-selected: #522b18;
   --accent-soft: rgba(255, 116, 24, .12);
@@ -62,7 +66,7 @@
   --bg-elevated: #ffffff;
   --bg-hover: #efeeeb;
   --bg-input: #ffffff;
-  --bg-timeline-header: #eee7df;
+  --bg-timeline-header: color-mix(in srgb, var(--accent) 5%, var(--bg-panel));
   --bg-timeline-canvas: #f0efec;
   --border: #dcdad5;
   --border-soft: #e7e5e0;
@@ -70,8 +74,11 @@
   --text-secondary: #666762;
   --text-muted: #858680;
   --text-disabled: #a5a59f;
-  --accent: #d95808;
-  --accent-hover: #eb6817;
+  --accent: #c84f08;
+  --accent-rgb: 200, 79, 8;
+  --accent-border: rgba(200, 79, 8, .22);
+  --accent-ink: #ffffff;
+  --accent-hover: #ad4205;
   --accent-selected: #f9e5d8;
   --accent-soft: rgba(217, 88, 8, .1);
   --success: #318258;
@@ -89,4 +96,4 @@ body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--bg-app)
 button, input, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-::selection { background: rgba(255, 116, 24, .35); }
+::selection { background: rgba(var(--accent-rgb), .35); }

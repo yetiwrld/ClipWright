@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { createProject, PROJECTS_KEY, writeProjects } from './lib/projects';
@@ -102,6 +102,7 @@ describe('ClipWright foundation UI', () => {
 
     expect(await screen.findByText('Interview cut')).toBeTruthy();
     await waitFor(() => expect(window.localStorage.getItem(PROJECTS_KEY)).toContain('Interview cut'));
+    expect(window.localStorage.getItem('clipwright.onboarding.completed.v1')).toBe('true');
     expect(window.localStorage.getItem(PROJECTS_KEY)).toContain('9:16');
     await waitFor(() => expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).toContain('"schemaVersion":2'));
     const savedDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
@@ -820,7 +821,7 @@ describe('ClipWright foundation UI', () => {
     const close = screen.getByRole('button', { name: 'Close help' });
     expect(window.document.activeElement).toBe(close);
     expect(dialog.textContent).toContain('Trim controls');
-    expect(dialog.textContent).toContain('AI analysis and offline desktop rendering are not included');
+    expect(dialog.textContent).toContain('Linked sources may need relinking if they move.');
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull());
     expect(window.document.activeElement).toBe(opener);
@@ -868,6 +869,88 @@ describe('ClipWright foundation UI', () => {
     expect(document.activeElement).toBe(recent);
   });
 
+  it('shows optional first-run guidance and remembers a skipped welcome screen', () => {
+    const { unmount } = render(<App />);
+    expect(screen.getByRole('region', { name: 'Start with a project, not a setup wizard.' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open existing project' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip onboarding' }));
+    expect(screen.queryByRole('region', { name: 'Start with a project, not a setup wizard.' })).toBeNull();
+    expect(window.localStorage.getItem('clipwright.onboarding.completed.v1')).toBe('true');
+    unmount();
+    render(<App />);
+    expect(screen.queryByRole('region', { name: 'Start with a project, not a setup wizard.' })).toBeNull();
+  });
+
+  it('skips first-run guidance when existing projects are present', () => {
+    writeProjects(window.localStorage, [createProject('Existing edit', '16:9', 30)]);
+    render(<App />);
+    expect(screen.queryByRole('region', { name: 'Start with a project, not a setup wizard.' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open Existing edit' })).toBeTruthy();
+  });
+
+  it('remembers project search and sort, and orders collections predictably', async () => {
+    const alpha = createProject('Alpha edit', '16:9', 30, new Date('2026-02-01T00:00:00Z'));
+    const zulu = createProject('Zulu edit', '16:9', 30, new Date('2026-01-01T00:00:00Z'));
+    writeProjects(window.localStorage, [zulu, alpha]);
+    const first = render(<App />);
+    const sort = screen.getByRole('combobox', { name: 'Sort projects' });
+    fireEvent.change(sort, { target: { value: 'name' } });
+    await waitFor(() => expect([...first.container.querySelectorAll('.project-thumb')].map((item) => item.getAttribute('aria-label'))).toEqual(['Open Alpha edit', 'Open Zulu edit']));
+    const search = screen.getByRole('textbox', { name: 'Search projects' });
+    fireEvent.change(search, { target: { value: 'Zulu' } });
+    expect(screen.getByText('1 project found')).toBeTruthy();
+    await waitFor(() => expect(window.localStorage.getItem('clipwright.projects.view.v1')).toContain('Zulu'));
+    first.unmount();
+    const second = render(<App />);
+    expect((screen.getByRole('textbox', { name: 'Search projects' }) as HTMLInputElement).value).toBe('Zulu');
+    expect((screen.getByRole('combobox', { name: 'Sort projects' }) as HTMLSelectElement).value).toBe('name');
+    expect(second.container.querySelectorAll('.project-thumb')).toHaveLength(1);
+  });
+
+  it('renders large project lists incrementally without hiding the remaining entries', () => {
+    const projects = Array.from({ length: 61 }, (_, index) => createProject(`Project ${String(index + 1).padStart(2, '0')}`, '16:9', 30, new Date('2026-01-01T00:00:00Z')));
+    writeProjects(window.localStorage, projects);
+    const { container } = render(<App />);
+    expect(container.querySelectorAll('.project-thumb')).toHaveLength(60);
+    expect(screen.getByText('Showing 60 of 61')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Load more projects' }));
+    expect(container.querySelectorAll('.project-thumb')).toHaveLength(61);
+    expect(screen.queryByRole('button', { name: 'Load more projects' })).toBeNull();
+  });
+
+  it('applies each interface scale and accent choice to the root design tokens', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
+    fireEvent.change(screen.getByRole('combobox', { name: /Interface scale/ }), { target: { value: '125' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Accent color/ }), { target: { value: 'blue' } });
+    await waitFor(() => {
+      expect(document.documentElement.dataset.uiScale).toBe('125');
+      expect(document.documentElement.style.getPropertyValue('--ui-scale')).toBe('1.25');
+      expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#4b91e2');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#28639e'));
+  });
+
+  it('runs an optional editor tour, supports Back and Escape, and can be restarted from Help', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
+    fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Tour project' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Create project$/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Help$/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start editor tour' }));
+    expect(await screen.findByRole('complementary', { name: 'Guided editor tour' })).toBeTruthy();
+    expect(document.querySelector('[data-tour="media-bin"]')?.getAttribute('data-tour-active')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.getByRole('heading', { name: 'Preview' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Guided editor tour' })).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: /^Help$/ }));
+    expect(screen.getByRole('button', { name: 'Start editor tour' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('uses keyboard navigation in the command palette to switch workspaces', async () => {
     render(<App />);
     const opener = screen.getByRole('button', { name: 'Settings' });
@@ -875,7 +958,7 @@ describe('ClipWright foundation UI', () => {
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     const input = await screen.findByPlaceholderText('Type a command…');
     expect(document.activeElement).toBe(input);
-    const options = screen.getAllByRole('option');
+    const options = within(screen.getByRole('listbox', { name: 'Available commands' })).getAllByRole('option');
     fireEvent.keyDown(input, { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(options[options.length - 1]);
     fireEvent.keyDown(options[options.length - 1], { key: 'Tab' });
@@ -886,7 +969,7 @@ describe('ClipWright foundation UI', () => {
 
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     const reopenedInput = await screen.findByPlaceholderText('Type a command…');
-    const reopenedOptions = screen.getAllByRole('option');
+    const reopenedOptions = within(screen.getByRole('listbox', { name: 'Available commands' })).getAllByRole('option');
     fireEvent.keyDown(reopenedInput, { key: 'ArrowUp' });
     expect(reopenedOptions[reopenedOptions.length - 1].getAttribute('aria-selected')).toBe('true');
     expect(reopenedInput.getAttribute('aria-activedescendant')).toBe(`command-option-${reopenedOptions.length - 1}`);
