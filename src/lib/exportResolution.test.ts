@@ -6,6 +6,11 @@ describe('export resolution presets', () => {
     expect(getExportDimensions(1920, 1080, 'sequence')).toEqual({ width: 1920, height: 1080 });
   });
 
+  it('keeps custom project-canvas dimensions exact for both landscape and portrait selections', () => {
+    expect(getExportDimensions(234, 146, 'sequence')).toEqual({ width: 234, height: 146 });
+    expect(getExportDimensions(180, 320, 'sequence')).toEqual({ width: 180, height: 320 });
+  });
+
   it('scales landscape sequences down to even long-edge presets', () => {
     expect(getExportDimensions(1920, 1080, '720p')).toEqual({ width: 1280, height: 720 });
     expect(getExportDimensions(1920, 1080, '540p')).toEqual({ width: 960, height: 540 });

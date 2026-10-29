@@ -13,12 +13,13 @@ import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, TimelineClip, Track } from './lib/projectDocument';
 import { probeBrowserAudio, probeBrowserVideo } from './lib/browserMedia';
-import { exportResolutionLabel } from './lib/exportResolution';
+import { exportResolutionLabel, getExportBitrates, getExportDimensions } from './lib/exportResolution';
 import type { ExportQualityPreset, ExportResolutionPreset } from './lib/exportResolution';
 import { prepareLocalMediaFile } from './lib/localMediaImport';
 import { calculateWaveformPeaks } from './lib/audioWaveform';
 import { selectActiveVideoClip } from './lib/timelineVideoFrames';
 import { exportTimelineProject, type TimelineExportResult } from './lib/timelineExport';
+import { checkMp4EncodingSupport } from './lib/deterministicWebmExport';
 import type { EncoderConfigDiagnostic, FramePipelineCounts } from './lib/deterministicWebmExport';
 import {
   addTimelineClip, clipDuration, clipEnd, duplicateTimelineClips, moveTimelineClips, pasteTimelineClips,
@@ -664,7 +665,12 @@ export default function App() {
         return { ...current, [projectId]: { past: [...history.past, previousSequence].slice(-50), future: [] } };
       });
       setDocuments((current) => current.map((document) => document.id === projectId ? updatedDocument : document));
-      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, updatedAt: updatedDocument.metadata.modifiedAt } : project));
+      setProjects((current) => current.map((project) => project.id === projectId ? {
+        ...project,
+        updatedAt: updatedDocument.metadata.modifiedAt,
+        aspectRatio: aspectRatioOf(updatedSequence.width, updatedSequence.height),
+        frameRate: updatedSequence.frameRate.numerator / updatedSequence.frameRate.denominator,
+      } : project));
       notify(successMessage);
       return true;
     } catch (error) {
@@ -718,7 +724,12 @@ export default function App() {
         };
       });
       setDocuments((current) => current.map((document) => document.id === projectId ? updatedDocument : document));
-      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, updatedAt: updatedDocument.metadata.modifiedAt } : project));
+      setProjects((current) => current.map((project) => project.id === projectId ? {
+        ...project,
+        updatedAt: updatedDocument.metadata.modifiedAt,
+        aspectRatio: aspectRatioOf(targetSequence.width, targetSequence.height),
+        frameRate: targetSequence.frameRate.numerator / targetSequence.frameRate.denominator,
+      } : project));
       notify(direction === 'undo' ? 'Undid the last timeline change.' : 'Redid the timeline change.');
       return true;
     } catch (error) {
@@ -730,14 +741,22 @@ export default function App() {
   function undoTimelineEdit() { return changeTimelineHistory(activeProjectId, 'undo'); }
   function redoTimelineEdit() { return changeTimelineHistory(activeProjectId, 'redo'); }
 
-  function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate']) {
+  function createNewProject(name: string, ratio: AspectRatio, fps: Project['frameRate'], dimensions: { width: number; height: number }) {
     if (storageWarning || documentStorageWarning) {
       notify('Resolve the project storage warning before creating a project.', 'error');
       return;
     }
     try {
       const project = createProject(name, ratio, fps);
-      const document = createProjectDocument(project);
+      const baseDocument = createProjectDocument(project);
+      const defaultSequenceId = baseDocument.projectSettings.defaultSequenceId;
+      const document = {
+        ...baseDocument,
+        sequences: baseDocument.sequences.map((sequence) => sequence.id === defaultSequenceId
+          ? { ...sequence, width: dimensions.width, height: dimensions.height }
+          : sequence),
+      };
+      if (!Number.isSafeInteger(dimensions.width) || !Number.isSafeInteger(dimensions.height) || dimensions.width < 16 || dimensions.height < 16 || dimensions.width > 16384 || dimensions.height > 16384) throw new Error('Canvas dimensions must be whole pixels from 16 to 16384.');
       setDocuments((current) => [...current.filter((item) => item.id !== project.id), document]);
       setProjects((current) => [project, ...current]);
       setActiveProjectId(project.id);
@@ -1136,9 +1155,11 @@ function useDialogFocusTrap<T extends HTMLElement>(initialFocus?: () => HTMLElem
   return containerRef;
 }
 
-function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string, ratio: AspectRatio, fps: Project['frameRate']) => void }) {
+function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string, ratio: AspectRatio, fps: Project['frameRate'], dimensions: { width: number; height: number }) => void }) {
   const [name, setName] = useState('');
-  const [ratio, setRatio] = useState<AspectRatio>('16:9');
+  const [ratio, setRatio] = useState<AspectRatio | 'custom'>('16:9');
+  const [width, setWidth] = useState('1920');
+  const [height, setHeight] = useState('1080');
   const [fps, setFps] = useState<Project['frameRate']>(30);
   const frameRateOptions: Array<{ value: number; label: string }> = [
     { value: 23.976, label: '23.976 fps (24000/1001)' },
@@ -1156,9 +1177,24 @@ function CreateProjectDialog({ onClose, onCreate }: { onClose: () => void; onCre
     <section ref={dialogRef} tabIndex={-1} className="dialog create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title">
       <div className="dialog-head"><div className="dialog-icon"><FilePlus2 size={17} /></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={17} /></button></div>
       <div className="eyebrow">NEW WORKSPACE</div><h2 id="create-title">Create a project</h2><p className="dialog-copy">Set up your sequence. You can change these settings later.</p>
-      <form onSubmit={(event) => { event.preventDefault(); onCreate(name, ratio, fps); }}>
+      <form onSubmit={(event) => {
+        event.preventDefault();
+        const numericWidth = Number(width);
+        const numericHeight = Number(height);
+        onCreate(name, aspectRatioOf(numericWidth, numericHeight) as AspectRatio, fps, { width: numericWidth, height: numericHeight });
+      }}>
         <label className="field-label" htmlFor="project-name">Project name</label><input ref={fieldRef} id="project-name" className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Summer campaign" maxLength={80} required />
-        <div className="form-row"><div><label className="field-label" htmlFor="aspect-ratio">Aspect ratio</label><select id="aspect-ratio" className="select-input" value={ratio} onChange={(event) => setRatio(event.target.value as AspectRatio)}><option>16:9</option><option>9:16</option><option>1:1</option></select></div><div><label className="field-label" htmlFor="frame-rate">Frame rate</label><select id="frame-rate" className="select-input" value={fps} onChange={(event) => setFps(Number(event.target.value) as Project['frameRate'])}>{frameRateOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div></div>
+        <div className="form-row"><div><label className="field-label" htmlFor="aspect-ratio">Aspect ratio</label><select id="aspect-ratio" className="select-input" value={ratio} onChange={(event) => {
+          const next = event.target.value as AspectRatio | 'custom';
+          setRatio(next);
+          const presets: Record<string, { width: number; height: number }> = {
+            '16:9': { width: 1920, height: 1080 }, '9:16': { width: 1080, height: 1920 }, '1:1': { width: 1080, height: 1080 },
+            '4:3': { width: 1440, height: 1080 }, '3:4': { width: 1080, height: 1440 }, '4:5': { width: 1080, height: 1350 },
+            '5:4': { width: 1350, height: 1080 }, '21:9': { width: 2520, height: 1080 },
+          };
+          if (presets[next]) { setWidth(String(presets[next].width)); setHeight(String(presets[next].height)); }
+        }}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>4:5</option><option>5:4</option><option>21:9</option><option value="custom">Custom</option></select></div><div><label className="field-label" htmlFor="frame-rate">Frame rate</label><select id="frame-rate" className="select-input" value={fps} onChange={(event) => setFps(Number(event.target.value) as Project['frameRate'])}>{frameRateOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div></div>
+        <div className="form-row"><div><label className="field-label" htmlFor="project-canvas-width">Canvas width (px)</label><input id="project-canvas-width" className="text-input" type="number" min="16" max="16384" step="1" value={width} onChange={(event) => setWidth(event.target.value)} required /></div><div><label className="field-label" htmlFor="project-canvas-height">Canvas height (px)</label><input id="project-canvas-height" className="text-input" type="number" min="16" max="16384" step="1" value={height} onChange={(event) => setHeight(event.target.value)} required /></div></div>
         <div className="local-note"><HardDrive size={14} /><span>Project details are saved locally in this browser profile. No media is copied.</span></div>
         <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button-primary"><Plus size={15} />Create project</button></div>
       </form>
@@ -1250,6 +1286,35 @@ function EditorFoundation({
   const [exportProgress, setExportProgress] = useState(0);
   const [exportResolution, setExportResolution] = useState<ExportResolutionPreset>('sequence');
   const [exportQuality, setExportQuality] = useState<ExportQualityPreset>('standard');
+  const [exportContainer, setExportContainer] = useState<'webm' | 'mp4'>('webm');
+  const [mp4Capability, setMp4Capability] = useState<{ pending: boolean; supported: boolean; reason: string | null }>({ pending: true, supported: false, reason: null });
+  const mp4AudioRequired = Boolean(sequence && tracks.some((track) => !track.muted && !hiddenTrackIds[track.id]
+    && (!soloTrackIds.length || soloTrackIds.includes(track.id))
+    && track.clips.some((clip) => track.kind === 'audio' || Boolean(assets.find((asset) => asset.id === clip.sourceId)?.streams.audio))));
+  const mp4Dimensions = sequence ? getExportDimensions(sequence.width, sequence.height, exportResolution) : null;
+  const mp4Bitrates = sequence && mp4Dimensions ? getExportBitrates(mp4Dimensions.width, mp4Dimensions.height, frameRateValue, exportQuality) : null;
+  useEffect(() => {
+    if (!sequence || !mp4Dimensions || !mp4Bitrates) {
+      setMp4Capability({ pending: false, supported: false, reason: 'Open a sequence to check MP4 support.' });
+      return;
+    }
+    let active = true;
+    setMp4Capability({ pending: true, supported: false, reason: null });
+    void checkMp4EncodingSupport({
+      width: mp4Dimensions.width,
+      height: mp4Dimensions.height,
+      frameRate: frameRateValue,
+      videoBitrate: mp4Bitrates.videoBitsPerSecond,
+      audioBitrate: mp4Bitrates.audioBitsPerSecond,
+      audioSampleRate: sequence.audioSampleRate,
+      includeAudio: mp4AudioRequired,
+    }).then((capability) => {
+      if (active) setMp4Capability({ pending: false, supported: capability.supported, reason: capability.reason });
+    }).catch((error) => {
+      if (active) setMp4Capability({ pending: false, supported: false, reason: error instanceof Error ? error.message : 'WebCodecs capability checks failed.' });
+    });
+    return () => { active = false; };
+  }, [sequence?.id, sequence?.width, sequence?.height, sequence?.audioSampleRate, frameRateValue, exportResolution, exportQuality, mp4AudioRequired, mp4Dimensions?.width, mp4Dimensions?.height, mp4Bitrates?.videoBitsPerSecond, mp4Bitrates?.audioBitsPerSecond]);
   const isExportingRef = useRef(false);
 
   const editorLayoutRef = useRef<HTMLDivElement>(null);
@@ -1344,6 +1409,15 @@ function EditorFoundation({
     const applied = onApplyTimelineEdit(edit, message);
     if (applied) requestPreviewRefresh();
     return applied;
+  }
+  function applyCanvasSettings(width: number, height: number, canvasFit: NonNullable<Sequence['canvasFit']>, canvasBackground: string) {
+    if (!sequence) return false;
+    return persistTimelineEdit((document) => ({
+      ...document,
+      sequences: document.sequences.map((item) => item.id === sequence.id
+        ? { ...item, width, height, canvasFit, canvasBackground }
+        : item),
+    }), `Updated project canvas to ${width} × ${height} pixels.`);
   }
   function undoTimelineEdit() {
     const applied = onUndo();
@@ -1704,6 +1778,10 @@ function EditorFoundation({
 
   async function startVideoExport() {
     if (!sequence || sequenceLength <= 0 || isPlaying || isExportingRef.current || !projectDocument) return;
+    if (exportContainer === 'mp4' && !mp4Capability.supported) {
+      onNotify(mp4Capability.reason ? `MP4 export is unavailable: ${mp4Capability.reason}` : 'MP4 capability checks have not passed for the selected dimensions and tracks. No alternate format was selected.', 'error');
+      return;
+    }
     const activeSequence = sequence;
     const activeProjectDocument = projectDocument;
     const activeSessionSources = { ...sessionSources };
@@ -1739,6 +1817,7 @@ function EditorFoundation({
         stage: exportStage,
         projectId: activeProjectDocument.id,
         sequenceId: activeSequence.id,
+        container: exportContainer,
         expected: {
           frameCount: expectedFrames,
           frameRate: activeSequence.frameRate,
@@ -1784,6 +1863,7 @@ function EditorFoundation({
         projectSnapshot: activeProjectDocument,
         sourceBlobs,
         sequenceId: activeSequence.id,
+        container: exportContainer,
         resolution: exportResolution,
         quality: exportQuality,
         hiddenTrackIds: activeHiddenTracks,
@@ -1801,12 +1881,13 @@ function EditorFoundation({
       });
       if (controller.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
 
+      const extension = exportContainer === 'mp4' ? 'mp4' : 'webm';
       const outputName = `${project?.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'ClipWright-export'}${exportResolution === 'sequence' ? '' : `-${result.outputDimensions.width}x${result.outputDimensions.height}`}${exportQuality === 'standard' ? '' : `-${exportQuality}`}`;
-      const blob = new Blob([result.buffer], { type: result.measurements.mimeType || 'video/webm' });
+      const blob = new Blob([result.buffer], { type: result.measurements.mimeType || (exportContainer === 'mp4' ? 'video/mp4' : 'video/webm') });
       const objectUrl = URL.createObjectURL(blob);
       const link = window.document.createElement('a');
       link.href = objectUrl;
-      link.download = `${outputName}.webm`;
+      link.download = `${outputName}.${extension}`;
       window.document.body.appendChild(link);
       link.click();
       link.remove();
@@ -1817,8 +1898,8 @@ function EditorFoundation({
         : `audio ${result.measurements.outputAudioDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.audioDeltaSeconds?.toFixed(6)}s, tol ${result.durationValidation.audioToleranceSeconds.toFixed(6)}s)`;
       const videoConfig = result.encoderConfiguration.video;
       const audioConfig = result.encoderConfiguration.audio;
-      const encoderSummary = `WebCodecs ${videoConfig?.codec ?? 'VP9'}${audioConfig ? `/${audioConfig.codec}` : ''}; hardware acceleration preference ${videoConfig?.hardwareAcceleration ?? 'default'} (physical hardware use unverified)`;
-      onNotify(`Exported ${outputName}.webm: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, output packets ${result.measurements.outputVideoPackets} (expected ${expectedFrames}); ${result.measurements.decodedSampleFrames} decoded validation samples passed; video ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.videoDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.videoToleranceSeconds.toFixed(6)}s) at ${result.measurements.outputVideoPacketRate.toFixed(6)} packets/s (sequence ${configuredFrameRate.toFixed(6)} fps); ${audioMeasurement}; container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.containerDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.containerToleranceSeconds.toFixed(6)}s); ${encoderSummary}.`, 'success');
+      const encoderSummary = `WebCodecs ${videoConfig?.codec ?? 'unknown'}${audioConfig ? `/${audioConfig.codec}` : ''}; hardware acceleration preference ${videoConfig?.hardwareAcceleration ?? 'default'} (actual hardware/software backend is not exposed by WebCodecs)`;
+      onNotify(`Exported ${outputName}.${extension}: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, output packets ${result.measurements.outputVideoPackets} (expected ${expectedFrames}); ${result.measurements.decodedSampleFrames} decoded validation samples passed; video ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.videoDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.videoToleranceSeconds.toFixed(6)}s) at ${result.measurements.outputVideoPacketRate.toFixed(6)} packets/s (sequence ${configuredFrameRate.toFixed(6)} fps); ${audioMeasurement}; container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.containerDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.containerToleranceSeconds.toFixed(6)}s); ${encoderSummary}.`, 'success');
       setExportProgress(100);
     } catch (error) {
       const isAbort = error instanceof DOMException && error.name === 'AbortError';
@@ -2381,9 +2462,9 @@ function EditorFoundation({
           </>}
         </aside>
         <div className="editor-center">
-          <div className="preview-stage"><div className="preview-frame">
-            <video ref={videoARef} className={`preview-video${activeDeck === 0 && timelineVideoVisible && deckReady[0] ? ' is-active' : ''}`} src={deckUrls[0] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[0])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 0} onLoadedMetadata={() => handlePreviewMetadata(0)} onLoadedData={() => handlePreviewReady(0)} onCanPlay={() => handlePreviewReady(0)} onPlay={() => { playRequestRef.current[0] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
-            <video ref={videoBRef} className={`preview-video${activeDeck === 1 && timelineVideoVisible && deckReady[1] ? ' is-active' : ''}`} src={deckUrls[1] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[1])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 1} onLoadedMetadata={() => handlePreviewMetadata(1)} onLoadedData={() => handlePreviewReady(1)} onCanPlay={() => handlePreviewReady(1)} onPlay={() => { playRequestRef.current[1] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
+          <div className="preview-stage"><div className="preview-frame" style={{ aspectRatio: `${sequence?.width ?? 16} / ${sequence?.height ?? 9}`, width: 'auto', height: '100%', backgroundColor: sequence?.canvasBackground ?? '#000000' }}>
+            <video ref={videoARef} className={`preview-video${activeDeck === 0 && timelineVideoVisible && deckReady[0] ? ' is-active' : ''}`} src={deckUrls[0] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[0])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 0} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} onLoadedMetadata={() => handlePreviewMetadata(0)} onLoadedData={() => handlePreviewReady(0)} onCanPlay={() => handlePreviewReady(0)} onPlay={() => { playRequestRef.current[0] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
+            <video ref={videoBRef} className={`preview-video${activeDeck === 1 && timelineVideoVisible && deckReady[1] ? ' is-active' : ''}`} src={deckUrls[1] ?? undefined} playsInline preload="auto" aria-label={`${assets.find((asset) => asset.id === deckSourceIdsRef.current[1])?.name ?? 'Timeline'} source preview`} aria-hidden={activeDeck !== 1} style={{ objectFit: sequence?.canvasFit === 'fill' ? 'cover' : sequence?.canvasFit === 'stretch' ? 'fill' : 'contain', backgroundColor: sequence?.canvasBackground ?? '#000000' }} onLoadedMetadata={() => handlePreviewMetadata(1)} onLoadedData={() => handlePreviewReady(1)} onCanPlay={() => handlePreviewReady(1)} onPlay={() => { playRequestRef.current[1] = false; }} onError={() => { setPlaybackError(true); onPlaybackError(); }} />
             {audioClips.map((clip) => {
               const asset = assets.find((item) => item.id === clip.sourceId);
               const source = projectDocument ? sessionSources[mediaKey(projectDocument.id, clip.sourceId)] : undefined;
@@ -2409,6 +2490,7 @@ function EditorFoundation({
         <aside className="properties-panel">
           <div className="panel-title">Properties</div>
           <div className="properties-body">
+            {sequence && <ProjectCanvasSettings sequence={sequence} onApply={applyCanvasSettings} />}
             {selectedClip && selectedClipAsset ? <div className="property-section selected-clip-properties">
               <span className="panel-kicker">TIMELINE CLIP</span><strong className="selected-clip-name">{selectedClipAsset.name}</strong>
               <div className="property-line"><span>Start</span><strong>{formatPlaybackTime(selectedClip.start)}</strong></div>
@@ -2459,10 +2541,15 @@ function EditorFoundation({
               <option value="540p">{sequence ? exportResolutionLabel(sequence.width, sequence.height, '540p') : '540p'}</option>
               <option value="360p">{sequence ? exportResolutionLabel(sequence.width, sequence.height, '360p') : '360p'}</option>
             </select></label>
+            <label className="export-container-control"><span className="sr-only">Export container</span><select aria-label="Export container" value={exportContainer} onChange={(event) => setExportContainer(event.target.value as 'webm' | 'mp4')} disabled={isExporting || !sequence}>
+              <option value="webm">WebM · VP9/Opus</option>
+              <option value="mp4" disabled={mp4Capability.pending || !mp4Capability.supported}>{mp4Capability.pending ? 'MP4 · checking codecs…' : mp4Capability.supported ? (mp4AudioRequired ? 'MP4 · H.264/AAC-LC' : 'MP4 · H.264 video-only') : 'MP4 · unavailable'}</option>
+            </select></label>
             <label className="export-quality-control" title="Sets a target encoder bitrate; browser and device output quality can vary."><span className="sr-only">Export quality</span><select aria-label="Export quality" value={exportQuality} onChange={(event) => setExportQuality(event.target.value as ExportQualityPreset)} disabled={isExporting || !sequence}>
               <option value="compact">Compact</option><option value="standard">Standard</option><option value="high">High</option>
             </select></label>
-            <button className={`button button-secondary button-small${isExporting ? ' export-cancel-button' : ''}`} type="button" onClick={isExporting ? cancelVideoExport : startVideoExport} disabled={!sequenceLength || (!isExporting && isPlaying)} aria-label={isExporting ? `Cancel WebM export at ${exportProgress}%` : 'Export timeline as WebM'} title={isExporting ? 'Cancel this export' : isPlaying ? 'Pause playback before exporting' : 'Record the timeline to a WebM video file'}><Download size={13} />{isExporting ? `Cancel ${exportProgress}%` : 'Export WebM'}</button>
+            <button className={`button button-secondary button-small${isExporting ? ' export-cancel-button' : ''}`} type="button" onClick={isExporting ? cancelVideoExport : startVideoExport} disabled={!sequenceLength || (!isExporting && isPlaying) || (!isExporting && exportContainer === 'mp4' && (mp4Capability.pending || !mp4Capability.supported))} aria-label={isExporting ? `Cancel ${exportContainer === 'webm' ? 'WebM' : 'MP4'} export at ${exportProgress}%` : `Export timeline as ${exportContainer === 'webm' ? 'WebM' : 'MP4'}`} title={isExporting ? 'Cancel this export' : exportContainer === 'mp4' && !mp4Capability.supported ? mp4Capability.reason ?? 'The selected MP4 encoder configuration is unavailable.' : isPlaying ? 'Pause playback before exporting' : `Export the timeline as ${exportContainer === 'webm' ? 'WebM' : 'MP4'}`}><Download size={13} />{isExporting ? `Cancel ${exportProgress}%` : `Export ${exportContainer === 'webm' ? 'WebM' : 'MP4'}`}</button>
+            {exportContainer === 'mp4' && !mp4Capability.pending && !mp4Capability.supported && <span className="export-capability-warning" role="status" title={mp4Capability.reason ?? ''}>MP4 unavailable for this configuration</span>}
             <button type="button" aria-label="Split clip at playhead" title="Split at playhead (S)" disabled={!sequenceLength} onClick={splitAtPlayhead}><Scissors size={14} /></button>
             <button type="button" aria-label="Duplicate selected clips" title="Duplicate (Ctrl/Cmd+D)" disabled={!selectedClipIds.length} onClick={duplicateSelected}><Copy size={14} /></button>
             <button type="button" aria-label="Copy selected clips" title="Copy (Ctrl/Cmd+C)" disabled={!selectedClipIds.length} onClick={copySelected}><ClipboardPaste size={14} /></button>
@@ -2568,6 +2655,42 @@ function RecoveryDialog({ projectName, points, restoring, onRestore, onClose }: 
       <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose} disabled={restoring}>Close</button></div>
     </section>
   </div>;
+}
+
+function ProjectCanvasSettings({ sequence, onApply }: { sequence: Sequence; onApply: (width: number, height: number, fit: NonNullable<Sequence['canvasFit']>, background: string) => void }) {
+  const fit = sequence.canvasFit ?? 'fit';
+  const background = sequence.canvasBackground ?? '#000000';
+  const ratio = aspectRatioOf(sequence.width, sequence.height);
+  const presets: Record<string, { width: number; height: number }> = {
+    '16:9': { width: 1920, height: 1080 }, '9:16': { width: 1080, height: 1920 }, '1:1': { width: 1080, height: 1080 },
+    '4:3': { width: 1440, height: 1080 }, '3:4': { width: 1080, height: 1440 }, '4:5': { width: 1080, height: 1350 },
+    '5:4': { width: 1350, height: 1080 }, '21:9': { width: 2520, height: 1080 },
+  };
+  return <section className="property-section project-canvas-settings" aria-labelledby="project-canvas-title">
+    <span className="panel-kicker">PROJECT CANVAS</span>
+    <strong id="project-canvas-title">{sequence.width} × {sequence.height} px · {ratio}</strong>
+    <label className="canvas-setting-label" htmlFor="canvas-aspect-preset">Aspect ratio preset</label>
+    <select id="canvas-aspect-preset" className="select-input" value={presets[ratio] ? ratio : 'custom'} onChange={(event) => {
+      const preset = presets[event.target.value];
+      if (preset) onApply(preset.width, preset.height, fit, background);
+    }}>
+      <option value="16:9">Landscape · 16:9</option><option value="9:16">Portrait · 9:16</option><option value="1:1">Square · 1:1</option>
+      <option value="4:3">Classic · 4:3</option><option value="3:4">Portrait · 3:4</option><option value="4:5">Social · 4:5</option>
+      <option value="5:4">Classic · 5:4</option><option value="21:9">Ultrawide · 21:9</option><option value="custom">Custom dimensions</option>
+    </select>
+    <form key={`${sequence.id}:${sequence.width}x${sequence.height}:${fit}:${background}`} className="canvas-settings-form" onSubmit={(event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      onApply(Number(data.get('width')), Number(data.get('height')), String(data.get('fit')) as NonNullable<Sequence['canvasFit']>, String(data.get('background')));
+    }}>
+      <div className="canvas-dimension-row"><div><label htmlFor="canvas-width">Width</label><input id="canvas-width" name="width" type="number" min="16" max="16384" step="1" defaultValue={sequence.width} required /></div><span aria-hidden="true">×</span><div><label htmlFor="canvas-height">Height</label><input id="canvas-height" name="height" type="number" min="16" max="16384" step="1" defaultValue={sequence.height} required /></div></div>
+      <label className="canvas-setting-label" htmlFor="canvas-fit">Source composition</label>
+      <select id="canvas-fit" name="fit" className="select-input" defaultValue={fit}><option value="fit">Fit · preserve full image</option><option value="fill">Fill · crop edges</option><option value="stretch">Stretch · distort to canvas</option></select>
+      <label className="canvas-setting-label" htmlFor="canvas-background">Canvas background</label><input id="canvas-background" name="background" type="color" defaultValue={background} />
+      <button className="button button-secondary button-small" type="submit">Apply canvas settings</button>
+    </form>
+    <small>These saved dimensions and composition are shared by the preview and both export formats. H.264/AVC requires even pixel dimensions; no automatic resizing is applied.</small>
+  </section>;
 }
 
 function SettingsDialog({ theme, onTheme, onClose }: { theme: 'dark' | 'light'; onTheme: (value: 'dark' | 'light') => void; onClose: () => void }) {

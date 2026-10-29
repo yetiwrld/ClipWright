@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AAC_LC_SAMPLES_PER_PACKET,
   OPUS_PACKET_DURATION_SECONDS,
+  aacPacketDurationSeconds,
   areExportFrameCountsExact,
   audioDurationToleranceSeconds,
   audioOnsetToleranceSeconds,
@@ -43,6 +45,17 @@ describe('deterministic sequence export plan', () => {
     expect(historicalDelta).toBeCloseTo(0.4126666667, 9);
     expect(Math.abs(historicalDelta)).toBeGreaterThan(audioDurationTolerance);
     // This asserts only the threshold arithmetic; it does not reproduce or resolve the user's historical export.
+  });
+
+  it('derives MP4 AAC-LC timing from its 1024-sample access units without applying the Opus packet duration', () => {
+    const aacPacket = aacPacketDurationSeconds(48_000);
+    expect(AAC_LC_SAMPLES_PER_PACKET).toBe(1024);
+    expect(aacPacket).toBeCloseTo(1024 / 48_000, 12);
+    const onset = audioOnsetToleranceSeconds(48_000, aacPacket, 1 / 90_000);
+    const duration = audioDurationToleranceSeconds(48_000, aacPacket, 1 / 90_000);
+    expect(onset).toBeCloseTo(aacPacket / 2 + 1 / 180_000 + 1 / 48_000, 12);
+    expect(duration).toBeCloseTo(aacPacket + 1 / 180_000 + 1 / 48_000, 12);
+    expect(duration).toBeLessThan(1 / 30);
   });
 
   it('derives fractional-rate timestamps and durations from rounded integer frame boundaries', () => {

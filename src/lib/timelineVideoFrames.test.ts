@@ -89,11 +89,25 @@ describe('timeline video frame selection and draw policy', () => {
     expect(drawImage).toHaveBeenCalledWith(source, 0, 25, 100, 50);
   });
 
-  it('leaves offline clips and timeline gaps black', () => {
+  it('uses explicit fill cropping, stretch geometry, and project background colors', () => {
     const fillRect = vi.fn();
     const drawImage = vi.fn();
     const context = { fillStyle: '', fillRect, drawImage } as unknown as CanvasRenderingContext2D;
-    drawLetterboxedVideoFrame(context, 320, 180, null);
+    const source = { width: 200, height: 100 } as HTMLCanvasElement;
+    drawLetterboxedVideoFrame(context, 100, 100, source, { fit: 'fill', background: '#123456' });
+    expect(context.fillStyle).toBe('#123456');
+    expect(drawImage).toHaveBeenLastCalledWith(source, -50, 0, 200, 100);
+    drawLetterboxedVideoFrame(context, 100, 100, source, { fit: 'stretch', background: '#abcdef' });
+    expect(context.fillStyle).toBe('#abcdef');
+    expect(drawImage).toHaveBeenLastCalledWith(source, 0, 0, 100, 100);
+  });
+
+  it('leaves offline clips and timeline gaps as the selected background', () => {
+    const fillRect = vi.fn();
+    const drawImage = vi.fn();
+    const context = { fillStyle: '', fillRect, drawImage } as unknown as CanvasRenderingContext2D;
+    drawLetterboxedVideoFrame(context, 320, 180, null, { background: '#123456' });
+    expect(context.fillStyle).toBe('#123456');
     expect(fillRect).toHaveBeenCalledWith(0, 0, 320, 180);
     expect(drawImage).not.toHaveBeenCalled();
   });

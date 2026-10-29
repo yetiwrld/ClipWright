@@ -28,6 +28,29 @@ describe('versioned project documents', () => {
     }
   });
 
+  it('round-trips custom canvas dimensions and explicit fit/fill/stretch composition settings', () => {
+    const document = createProjectDocument(createProject('Custom canvas', '117:73', 30));
+    const sequence = document.sequences[0];
+    sequence.width = 234;
+    sequence.height = 146;
+    sequence.canvasFit = 'fill';
+    sequence.canvasBackground = '#26384a';
+    const reopened = parseProjectDocument(serializeProjectDocument(document));
+    expect(reopened.sequences[0]).toMatchObject({ width: 234, height: 146, canvasFit: 'fill', canvasBackground: '#26384a' });
+
+    sequence.canvasFit = 'stretch';
+    expect(validateProjectDocument(document).valid).toBe(true);
+    sequence.canvasFit = 'silent-crop' as never;
+    const invalidFit = validateProjectDocument(document);
+    expect(invalidFit.valid).toBe(false);
+    if (!invalidFit.valid) expect(invalidFit.errors).toContain('sequences[0].canvasFit must be fit, fill, or stretch.');
+    sequence.canvasFit = 'fit';
+    sequence.canvasBackground = 'red';
+    const invalidBackground = validateProjectDocument(document);
+    expect(invalidBackground.valid).toBe(false);
+    if (!invalidBackground.valid) expect(invalidBackground.errors).toContain('sequences[0].canvasBackground must be a six-digit hex color.');
+  });
+
   it('supports backward-compatible per-track gain and pan settings', () => {
     const document = createProjectDocument(createProject('Audio controls', '16:9', 30));
     const audioTrack = document.sequences[0].tracks.find((track) => track.kind === 'audio')!;

@@ -1,4 +1,4 @@
-export type AspectRatio = '16:9' | '9:16' | '1:1';
+export type AspectRatio = '16:9' | '9:16' | '1:1' | '4:3' | '3:4' | '4:5' | '5:4' | '21:9' | `${number}:${number}`;
 export type Project = {
   id: string;
   name: string;

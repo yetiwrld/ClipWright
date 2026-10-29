@@ -59,6 +59,9 @@ export type Sequence = {
   name: string;
   width: number;
   height: number;
+  /** Optional schema-v2 canvas composition; older project files default to fit on black. */
+  canvasFit?: 'fit' | 'fill' | 'stretch';
+  canvasBackground?: string;
   frameRate: Rational;
   audioSampleRate: number;
   durationFrames: number;
@@ -225,6 +228,8 @@ export function validateProjectDocument(value: unknown): ValidationResult {
     if (!isString(sequence.name)) errors.push(`${path}.name must be a non-empty string.`);
     if (!isDimension(sequence.width)) errors.push(`${path}.width must be between 16 and 16384.`);
     if (!isDimension(sequence.height)) errors.push(`${path}.height must be between 16 and 16384.`);
+    if (sequence.canvasFit !== undefined && !['fit', 'fill', 'stretch'].includes(String(sequence.canvasFit))) errors.push(`${path}.canvasFit must be fit, fill, or stretch.`);
+    if (sequence.canvasBackground !== undefined && (typeof sequence.canvasBackground !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(sequence.canvasBackground))) errors.push(`${path}.canvasBackground must be a six-digit hex color.`);
     if (!isFrameRate(sequence.frameRate)) errors.push(`${path}.frameRate must be a rational from 1 to 240 fps.`);
     if (!isSampleRate(sequence.audioSampleRate)) errors.push(`${path}.audioSampleRate must be between 8000 and 384000 Hz.`);
     if (!isInteger(sequence.durationFrames)) errors.push(`${path}.durationFrames must be a non-negative safe integer.`);

@@ -21,22 +21,31 @@ def sample_rgb(frame, width, x, y):
 
 
 def classify_frame(frame, width, height):
-    red, green, blue = sample_rgb(frame, width, 18, 90)
+    scale = min(width / 320.0, height / 180.0)
+    offset_x = (width - 320 * scale) / 2
+    offset_y = (height - 180 * scale) / 2
+
+    def source_pixel(x, y):
+        out_x = min(width - 1, max(0, round(offset_x + x * scale)))
+        out_y = min(height - 1, max(0, round(offset_y + y * scale)))
+        return sample_rgb(frame, width, out_x, out_y)
+
+    red, green, blue = source_pixel(18, 90)
     source_id = None
     if blue > 150 and red < 120 and green < 175:
         source_id = "A"
     elif red > 170 and 65 < green < 165 and blue < 130:
         source_id = "B"
     if source_id is None:
-        background = sample_rgb(frame, width, 306, 164)
+        background = source_pixel(306, 164)
         if max(background) < 20:
             return {"sourceId": None, "frameIndex": None, "isGap": True, "hasSyncFlash": False}
     frame_index = 0
     for bit in range(6):
-        pixel = sample_rgb(frame, width, 72 + bit * 36, 88)
+        pixel = source_pixel(72 + bit * 36, 88)
         if max(pixel) > 150:
             frame_index |= 1 << bit
-    flash = sample_rgb(frame, width, 294, 28)
+    flash = source_pixel(294, 28)
     return {
         "sourceId": source_id,
         "frameIndex": frame_index if source_id else None,
@@ -84,6 +93,138 @@ def detect_audio_onsets(pcm, sample_rate):
             onsets.append(index / sample_rate)
         last_active = index
     return onsets
+
+
+def validate_dimension_output(path, specification, fixture, source_frame_times, ffmpeg, ffprobe):
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise AssertionError(f"Required production output is missing or empty: {path.name}")
+    expected_count = int(fixture["expectedFrameCount"])
+    expected_duration = float(fixture["expectedDurationSeconds"])
+    rate = fixture["frameRate"]
+    fps = float(rate["numerator"]) / float(rate["denominator"])
+    frame_period = 1.0 / fps
+    metadata = run_json(ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)])
+    streams = metadata.get("streams", [])
+    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    if video is None:
+        raise AssertionError(f"{path.name}: ffprobe found no video stream")
+    expected_width, expected_height = int(specification["width"]), int(specification["height"])
+    if int(video.get("width", 0)) != expected_width or int(video.get("height", 0)) != expected_height:
+        raise AssertionError(f"{path.name}: dimensions {video.get('width')}x{video.get('height')} do not exactly match {expected_width}x{expected_height}")
+    expected_video_codec = specification["videoCodec"]
+    if expected_video_codec == "h264":
+        if video.get("codec_name") != "h264" or video.get("codec_tag_string") != "avc1" or not video.get("profile"):
+            raise AssertionError(f"{path.name}: expected genuine avc1 H.264 video with a reported profile, found {video}")
+        if "mp4" not in str(metadata.get("format", {}).get("format_name", "")).lower():
+            raise AssertionError(f"{path.name}: ffprobe did not identify an MP4 container")
+    elif video.get("codec_name") != expected_video_codec:
+        raise AssertionError(f"{path.name}: expected {expected_video_codec} video, got {video.get('codec_name')}")
+    expected_audio = bool(specification["audio"])
+    if expected_audio and (audio is None or audio.get("codec_name") != "aac" or str(audio.get("profile", "")).lower() not in ("lc", "aac lc")):
+        raise AssertionError(f"{path.name}: expected AAC-LC audio, found {audio}")
+    if not expected_audio and audio is not None:
+        raise AssertionError(f"{path.name}: video-only output unexpectedly contains an audio stream")
+
+    def timebase(stream, name):
+        value = stream.get("time_base")
+        if not value or "/" not in value:
+            raise AssertionError(f"{path.name}: ffprobe did not report the {name} time base")
+        numerator, denominator = (float(part) for part in value.split("/", 1))
+        if numerator <= 0 or denominator <= 0:
+            raise AssertionError(f"{path.name}: invalid {name} time base {value}")
+        return numerator / denominator
+
+    video_timebase = timebase(video, "video")
+    video_tolerance = frame_period / 2 + video_timebase / 2
+    frame_data = run_json(ffprobe, ["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time,pkt_duration_time", "-of", "json", str(path)]).get("frames", [])
+    frame_times = [float(record["best_effort_timestamp_time"]) for record in frame_data if "best_effort_timestamp_time" in record]
+    if len(frame_data) != expected_count or len(frame_times) != expected_count:
+        raise AssertionError(f"{path.name}: ffprobe returned {len(frame_data)} frame records; expected {expected_count}")
+    if any(right <= left for left, right in zip(frame_times, frame_times[1:])):
+        raise AssertionError(f"{path.name}: video timestamps are not strictly increasing")
+    timestamp_errors = [actual - index / fps for index, actual in enumerate(frame_times)]
+    if any(abs(error) > video_tolerance for error in timestamp_errors):
+        raise AssertionError(f"{path.name}: video frame timestamp error exceeds {video_tolerance:.9f}s")
+
+    decoded = subprocess.run([ffmpeg, "-v", "warning", "-xerror", "-i", str(path), "-map", "0:v:0", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], check=False, capture_output=True)
+    if decoded.returncode != 0:
+        raise RuntimeError(f"{path.name}: FFmpeg video decode failed: {decoded.stderr.decode('utf-8', errors='replace')[-4000:]}")
+    bytes_per_frame = expected_width * expected_height * 3
+    decoded_count, remainder = divmod(len(decoded.stdout), bytes_per_frame)
+    if remainder or decoded_count != expected_count:
+        raise AssertionError(f"{path.name}: FFmpeg decoded {decoded_count} frames (remainder={remainder}); expected {expected_count}")
+    actual_frames = [classify_frame(decoded.stdout[index * bytes_per_frame:(index + 1) * bytes_per_frame], expected_width, expected_height) for index in range(expected_count)]
+    expected = expected_frames(fixture, source_frame_times)
+    mismatches = [{"frame": index, "expected": expected[index], "actual": actual_frames[index]} for index in range(expected_count) if expected[index] != actual_frames[index]]
+    if mismatches:
+        raise AssertionError(f"{path.name}: independent decoded content/order mismatch at frame {mismatches[0]['frame']}: {mismatches[0]}")
+
+    report = {
+        "file": path.name,
+        "container": "MP4" if expected_video_codec == "h264" else "WebM",
+        "codec": {"video": video.get("codec_name"), "profile": video.get("profile"), "audio": audio.get("codec_name") if audio else None, "audioProfile": audio.get("profile") if audio else None},
+        "dimensions": {"width": expected_width, "height": expected_height},
+        "counts": {"ffprobeFrames": len(frame_data), "fullyDecodedFrames": decoded_count},
+        "content": {"identityFramesCompared": expected_count, "mismatchCount": len(mismatches), "firstMismatch": None},
+        "timing": {"videoTimebaseSeconds": video_timebase, "videoTimestampToleranceSeconds": video_tolerance, "timestampErrorRangeSeconds": [min(timestamp_errors), max(timestamp_errors)]},
+    }
+    if expected_audio:
+        audio_timebase = timebase(audio, "audio")
+        sample_rate = int(audio.get("sample_rate", 0))
+        if sample_rate != 48_000:
+            raise AssertionError(f"{path.name}: AAC-LC sample rate is {sample_rate}, expected 48000")
+        aac_packet_duration = 1024.0 / sample_rate
+        audio_onset_tolerance = aac_packet_duration / 2 + audio_timebase / 2 + 1.0 / sample_rate
+        audio_duration_tolerance = aac_packet_duration + audio_timebase / 2 + 1.0 / sample_rate
+        packets = run_json(ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_packets", "-show_entries", "packet=pts_time,duration_time", "-of", "json", str(path)]).get("packets", [])
+        packet_times = [float(packet["pts_time"]) for packet in packets if "pts_time" in packet]
+        packet_durations = [float(packet["duration_time"]) for packet in packets if packet.get("duration_time") not in (None, "N/A", "nan")]
+        packet_tolerance = audio_timebase + 1.0 / sample_rate
+        if not packets or len(packet_times) != len(packets) or any(right <= left for left, right in zip(packet_times, packet_times[1:])):
+            raise AssertionError(f"{path.name}: AAC packet timestamps are absent or non-monotonic")
+        if not packet_durations or any(abs(duration - aac_packet_duration) > packet_tolerance for duration in packet_durations):
+            raise AssertionError(f"{path.name}: AAC packet duration does not match 1024 samples at {sample_rate} Hz")
+        if any(abs((right - left) - aac_packet_duration) > packet_tolerance for left, right in zip(packet_times, packet_times[1:])):
+            raise AssertionError(f"{path.name}: AAC packet spacing does not match AAC-LC access-unit duration")
+        pcm = subprocess.run([ffmpeg, "-v", "error", "-xerror", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "pipe:1"], check=True, capture_output=True).stdout
+        if not pcm:
+            raise AssertionError(f"{path.name}: FFmpeg decoded no AAC samples")
+        audio_duration = (len(pcm) // 2) / sample_rate
+        onsets = detect_audio_onsets(pcm, sample_rate)
+        expected_onsets = [float(value) for value in fixture["expectedAudioPulseOnsetsSeconds"]]
+        if len(onsets) != len(expected_onsets):
+            raise AssertionError(f"{path.name}: decoded {len(onsets)} AAC pulse onsets; expected {len(expected_onsets)}: {onsets}")
+        onset_errors = [actual - expected for actual, expected in zip(onsets, expected_onsets)]
+        if any(abs(error) > audio_onset_tolerance for error in onset_errors):
+            raise AssertionError(f"{path.name}: AAC onset error exceeds packet-derived tolerance {audio_onset_tolerance:.9f}s: {onset_errors}")
+        flash_indexes = [index for index, frame in enumerate(actual_frames) if frame["hasSyncFlash"]]
+        expected_flashes = [index for index, frame in enumerate(expected) if frame["hasSyncFlash"]]
+        if flash_indexes != expected_flashes:
+            raise AssertionError(f"{path.name}: decoded A/V flash markers differ from the expected frames")
+        pulse_frames = [int(value) for value in fixture["expectedAudioPulseFrameIndexes"]]
+        av_offsets = [onsets[index] - frame_times[frame_index] for index, frame_index in enumerate(pulse_frames)]
+        if len(av_offsets) != len(onsets) or any(abs(offset) > audio_onset_tolerance for offset in av_offsets):
+            raise AssertionError(f"{path.name}: AAC/video sync offset exceeds packet-derived tolerance {audio_onset_tolerance:.9f}s: {av_offsets}")
+        last_duration = frame_data[-1].get("pkt_duration_time")
+        if last_duration in (None, "N/A", "nan"):
+            last_duration = statistics.median(right - left for left, right in zip(frame_times, frame_times[1:]))
+        video_duration = frame_times[-1] + float(last_duration) - frame_times[0]
+        container_duration = float(metadata.get("format", {}).get("duration", "nan"))
+        duration_deltas = {"video": video_duration - expected_duration, "audio": audio_duration - expected_duration, "container": container_duration - expected_duration}
+        if abs(duration_deltas["video"]) > video_tolerance or abs(duration_deltas["audio"]) > audio_duration_tolerance or abs(duration_deltas["container"]) > max(video_tolerance, audio_duration_tolerance):
+            raise AssertionError(f"{path.name}: packet-derived duration validation failed: {duration_deltas}")
+        report["counts"].update({"audioPackets": len(packets), "decodedAudioSamples": len(pcm) // 2})
+        report["timing"].update({
+            "audioTimebaseSeconds": audio_timebase,
+            "aacAccessUnitDurationSeconds": aac_packet_duration,
+            "audioOnsetToleranceSeconds": audio_onset_tolerance,
+            "audioDurationToleranceSeconds": audio_duration_tolerance,
+            "audioOnsetErrorsSeconds": onset_errors,
+            "audioMinusVideoOffsetsSeconds": av_offsets,
+            "durationDeltasSeconds": duration_deltas,
+        })
+    return report
 
 
 def main():
@@ -303,6 +444,27 @@ def main():
             "physicalHardwareEncoderVerified": False,
         },
     }
+    mp4_specs = fixture.get("mp4Outputs")
+    required_outputs = ["timeline-export.mp4", "timeline-video-only.mp4", "timeline-custom.mp4", "timeline-custom.webm"]
+    if not isinstance(mp4_specs, dict):
+        raise AssertionError("Production smoke did not report required MP4 and custom-dimension output specifications")
+    if mp4_specs.get("cancellationThenRetryPassed") is not True or smoke.get("frameIdentity", {}).get("mp4CancellationThenRetryPassed") is not True:
+        raise AssertionError("Production MP4 cancellation cleanup and retry coverage is missing or failed")
+    mp4_production = smoke.get("frameIdentity", {}).get("mp4Production", [])
+    if len(mp4_production) != 4 or any(item.get("passed") is not True for item in mp4_production):
+        raise AssertionError("Production smoke did not pass all required MP4/WebM format, track, and dimension configurations")
+    independent_outputs = []
+    for name in required_outputs:
+        specification = mp4_specs.get(name)
+        if not isinstance(specification, dict) or not {"width", "height", "audio", "videoCodec"}.issubset(specification):
+            raise AssertionError(f"Production smoke is missing exact codec/dimension metadata for {name}")
+        independent_outputs.append(validate_dimension_output(root / name, specification, fixture, source_frame_times, args.ffmpeg, args.ffprobe))
+
+    report["mp4ProductionOutputs"] = independent_outputs
+    report["productionMp4CancellationThenRetryPassed"] = True
+    report["runtime"] = smoke.get("runtime", {})
+    report["requiredMp4Coverage"] = {"videoOnly": True, "videoWithAacLc": True, "landscape": True, "portrait": True, "customDimensions": True, "independentDecode": True, "cancellationRetry": True}
+    report["pass"] = True
     Path(args.report).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
 

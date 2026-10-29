@@ -9,8 +9,10 @@ import {
   areExportFrameCountsExact,
   encoderConfigDiagnostic,
   OPUS_PACKET_DURATION_SECONDS,
+  aacPacketDurationSeconds,
   audioDurationToleranceSeconds,
   createSequenceExportPlan,
+  encodeDeterministicMp4,
   encodeDeterministicWebm,
   videoTimestampToleranceSeconds,
 } from './deterministicWebmExport';
@@ -27,6 +29,7 @@ export interface TimelineExportRequest {
   sequenceId?: string;
   resolution?: ExportResolutionPreset;
   quality?: ExportQualityPreset;
+  container?: 'webm' | 'mp4';
   hiddenTrackIds?: Readonly<Record<string, boolean>>;
   soloTrackIds?: readonly string[];
   signal: AbortSignal;
@@ -74,7 +77,7 @@ function findSequence(document: ProjectDocument, sequenceId?: string): Sequence 
 }
 
 /**
- * Production timeline-to-WebM path shared by the editor and packaged synthetic end-to-end tests.
+ * Production deterministic timeline export shared by the editor and packaged synthetic end-to-end tests.
  * The snapshot is revalidated, clips are interpreted against its sequence, and every output frame is
  * decoded from the supplied local source blob at the clip's mapped source timestamp.
  */
@@ -85,6 +88,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
   if (!validation.valid) throw new Error(`Cannot export an invalid project snapshot: ${validation.errors.join(' ')}`);
   const project = validation.value;
   const sequence = findSequence(project, request.sequenceId);
+  const container = request.container ?? 'webm';
   if (sequence.durationFrames < 1) throw new Error('The active sequence has no output frames.');
   const outputDimensions = getExportDimensions(sequence.width, sequence.height, request.resolution ?? 'sequence');
   if (outputDimensions.width * outputDimensions.height > 33_177_600) {
@@ -210,19 +214,24 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
         }
       }
       assertNotAborted(request.signal);
-      drawLetterboxedVideoFrame(canvasContext, canvas.width, canvas.height, sourceCanvas);
+      drawLetterboxedVideoFrame(canvasContext, canvas.width, canvas.height, sourceCanvas, {
+        fit: sequence.canvasFit ?? 'fit',
+        background: sequence.canvasBackground ?? '#000000',
+      });
     };
 
-    stage = 'encoding and muxing WebM';
+    stage = `encoding and muxing ${container.toUpperCase()}`;
     request.onStage?.(stage);
     const bitrates = getExportBitrates(outputDimensions.width, outputDimensions.height, sequence.frameRate.numerator / sequence.frameRate.denominator, request.quality ?? 'standard');
     let videoEncoderConfig: EncoderConfigDiagnostic | null = null;
     let audioEncoderConfig: EncoderConfigDiagnostic | null = null;
-    const result = await encodeDeterministicWebm({
+    const encode = container === 'mp4' ? encodeDeterministicMp4 : encodeDeterministicWebm;
+    const result = await encode({
       canvas,
       plan,
       videoBitrate: bitrates.videoBitsPerSecond,
       audioBitrate: bitrates.audioBitsPerSecond,
+      audioSampleRate: sequence.audioSampleRate,
       includeAudio: audioReaders.length > 0,
       signal: request.signal,
       drawFrame,
@@ -254,9 +263,10 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
     });
     const videoToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / measurements.videoTimeResolution);
     const outputAudioSampleRate = measurements.outputAudioSampleRate ?? sequence.audioSampleRate;
+    const audioPacketSeconds = measurements.audioCodec === 'aac' ? aacPacketDurationSeconds(outputAudioSampleRate) : OPUS_PACKET_DURATION_SECONDS;
     const audioToleranceSeconds = measurements.audioTimeResolution
-      ? audioDurationToleranceSeconds(outputAudioSampleRate, OPUS_PACKET_DURATION_SECONDS, 1 / measurements.audioTimeResolution)
-      : audioDurationToleranceSeconds(outputAudioSampleRate);
+      ? audioDurationToleranceSeconds(outputAudioSampleRate, audioPacketSeconds, 1 / measurements.audioTimeResolution)
+      : audioDurationToleranceSeconds(outputAudioSampleRate, audioPacketSeconds);
     const containerToleranceSeconds = Math.max(videoToleranceSeconds, expectedAudioTrack ? audioToleranceSeconds : videoToleranceSeconds);
     const durationValidation = {
       expectedSeconds: expectedDuration,
@@ -269,7 +279,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
     };
     const encoderConfiguration = { video: videoEncoderConfig, audio: audioEncoderConfig };
     const localValidationDiagnostics = {
-      stage: 'validating finalized WebM',
+      stage: `validating finalized ${container.toUpperCase()}`,
       counts: result.counts,
       measurements,
       expectedAudioTrack,
@@ -282,7 +292,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       && (!expectedAudioTrack || (audioDelta !== null && Math.abs(audioDelta) <= audioToleranceSeconds))
       && Math.abs(containerDelta) <= containerToleranceSeconds;
     if (!frameCountsMatch || !durationsMatch) {
-      stage = 'validating finalized WebM';
+      stage = `validating finalized ${container.toUpperCase()}`;
       request.onStage?.(stage);
       const error = new Error(`Export validation failed: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, output video packets ${measurements.outputVideoPackets} (expected ${expectedFrames}); video duration ${measurements.outputVideoDurationSeconds.toFixed(6)}s (delta ${videoDelta.toFixed(6)}s; tolerance ${videoToleranceSeconds.toFixed(6)}s), audio ${measurements.outputAudioDurationSeconds === null ? 'missing' : `${measurements.outputAudioDurationSeconds.toFixed(6)}s (delta ${audioDelta?.toFixed(6)}s; tolerance ${audioToleranceSeconds.toFixed(6)}s)`}, container ${measurements.outputContainerDurationSeconds.toFixed(6)}s (delta ${containerDelta.toFixed(6)}s; tolerance ${containerToleranceSeconds.toFixed(6)}s).`);
       Object.assign(error, { exportDiagnostics: localValidationDiagnostics });

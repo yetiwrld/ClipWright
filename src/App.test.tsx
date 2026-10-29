@@ -105,7 +105,9 @@ describe('ClipWright foundation UI', () => {
     expect(window.localStorage.getItem(PROJECTS_KEY)).toContain('9:16');
     await waitFor(() => expect(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY)).toContain('"schemaVersion":2'));
     const savedDocuments = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+    expect(savedDocuments[0].sequences[0]).toMatchObject({ width: 1080, height: 1920 });
     expect(savedDocuments[0].sequences[0].tracks).toHaveLength(2);
+    expect(screen.getByText(/1080 × 1920 px · 9:16/)).toBeTruthy();
     expect(screen.getByText('Add media to the timeline to preview')).toBeTruthy();
     expect([...container.querySelectorAll('.editor-layout > *')].map((element) => element.className)).toEqual([
       'editor-main-row',
@@ -197,6 +199,31 @@ describe('ClipWright foundation UI', () => {
     expect(screen.getByRole('button', { name: 'Exit focus mode' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Exit focus mode' }));
     expect(shell.classList.contains('is-editor-focus')).toBe(false);
+  });
+
+  it('creates custom canvases and persists exact dimensions, composition, and background settings', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /create your first project/i }));
+    fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Custom frame' } });
+    fireEvent.change(screen.getByLabelText('Aspect ratio'), { target: { value: 'custom' } });
+    fireEvent.change(screen.getByLabelText('Canvas width (px)'), { target: { value: '234' } });
+    fireEvent.change(screen.getByLabelText('Canvas height (px)'), { target: { value: '146' } });
+    fireEvent.click(screen.getByRole('button', { name: /create project/i }));
+    await screen.findByText('Custom frame');
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+      expect(stored[0].sequences[0]).toMatchObject({ width: 234, height: 146 });
+    });
+
+    fireEvent.change(screen.getByLabelText('Width'), { target: { value: '320' } });
+    fireEvent.change(screen.getByLabelText('Height'), { target: { value: '180' } });
+    fireEvent.change(screen.getByLabelText('Source composition'), { target: { value: 'fill' } });
+    fireEvent.change(screen.getByLabelText('Canvas background'), { target: { value: '#123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply canvas settings' }));
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem(PROJECT_DOCUMENTS_KEY) ?? '[]');
+      expect(stored[0].sequences[0]).toMatchObject({ width: 320, height: 180, canvasFit: 'fill', canvasBackground: '#123456' });
+    });
   });
 
   it('renders imported audio clips as selectable, editable timeline blocks', async () => {

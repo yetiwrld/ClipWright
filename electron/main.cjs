@@ -275,7 +275,7 @@ function runRendererSmokeCheck(window) {
       if (state.title === 'ClipWright Studio' && state.mounted && state.info?.name && state.info?.platform) {
         if (!exportSmokeStarted) {
           exportSmokeStarted = true;
-          stage = 'running deterministic WebM export and frame-identity smoke';
+          stage = 'running deterministic WebM and required H.264/AAC MP4 production-export smoke';
           const smokePayload = await Promise.race([
             window.webContents.executeJavaScript(`import('./export-smoke.js').then(async ({ runDeterministicWebmSmoke }) => {
               const result = await runDeterministicWebmSmoke((stage) => { window.__clipwrightSmokeStage = stage; });
@@ -284,16 +284,26 @@ function runRendererSmokeCheck(window) {
             new Promise((_, reject) => setTimeout(async () => {
               let currentStage = 'smoke progress was not reported';
               try { currentStage = await window.webContents.executeJavaScript('window.__clipwrightSmokeStage ?? "smoke progress was not reported"'); } catch { /* Preserve the timeout if renderer diagnostics are unavailable. */ }
-              reject(new Error(`Deterministic WebM export smoke timed out after 120 seconds; last stage: ${currentStage}`));
+              reject(new Error(`Deterministic WebM/MP4 export smoke timed out after 120 seconds; last stage: ${currentStage}`));
             }, 120_000)),
           ]);
           smokeMeasurements = typeof smokePayload === 'string' ? JSON.parse(smokePayload) : smokePayload;
           await writeSmokeArtifacts(smokeMeasurements?.artifacts);
-          const report = reportWithoutArtifacts(smokeMeasurements);
+          const report = {
+            ...reportWithoutArtifacts(smokeMeasurements),
+            runtime: {
+              electronVersion: process.versions.electron,
+              chromiumVersion: process.versions.chrome,
+              nodeVersion: process.versions.node,
+              encoderApi: 'WebCodecs VideoEncoder/AudioEncoder via Mediabunny',
+              actualHardwareSoftwareBackend: 'not exposed by the WebCodecs API',
+              hardwareAccelerationPreference: 'no-preference unless otherwise reported per encoder config',
+            },
+          };
           await writeSmokeReport(report);
-          if (!report?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(report)}`);
+          if (!report?.pass) throw new Error(`Deterministic WebM/MP4 production-export smoke failed: ${JSON.stringify(report)}`);
           finished = true;
-          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(report)}`);
+          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; WebM and MP4 production-export measurements: ${JSON.stringify(report)}`);
           app.exit(0);
           return;
         }
@@ -303,8 +313,21 @@ function runRendererSmokeCheck(window) {
       const message = error instanceof Error ? error.message : String(error);
       await writeSmokeArtifacts(smokeMeasurements?.artifacts);
       const report = smokeMeasurements && typeof smokeMeasurements === 'object'
-        ? { ...reportWithoutArtifacts(smokeMeasurements), pass: false, stage, error: message }
-        : { pass: false, stage, error: message, stack: error instanceof Error ? error.stack : undefined };
+        ? {
+            ...reportWithoutArtifacts(smokeMeasurements), pass: false, stage, error: message,
+            runtime: {
+              electronVersion: process.versions.electron,
+              chromiumVersion: process.versions.chrome,
+              nodeVersion: process.versions.node,
+              encoderApi: 'WebCodecs VideoEncoder/AudioEncoder via Mediabunny',
+              actualHardwareSoftwareBackend: 'not exposed by the WebCodecs API',
+              hardwareAccelerationPreference: 'no-preference unless otherwise reported per encoder config',
+            },
+          }
+        : {
+            pass: false, stage, error: message, stack: error instanceof Error ? error.stack : undefined,
+            runtime: { electronVersion: process.versions.electron, chromiumVersion: process.versions.chrome, nodeVersion: process.versions.node },
+          };
       await writeSmokeReport(report);
       console.error('Desktop smoke test failed:', error);
       app.exit(1);

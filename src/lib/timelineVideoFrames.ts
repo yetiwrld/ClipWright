@@ -97,18 +97,21 @@ export function sourceTimeForTimelineClip(clip: TimelineClip, timelineTimeSecond
   return clip.trimIn + timelineTimeSeconds - clip.start;
 }
 
-/** Clears to black, then aspect-fits a decoded frame without cropping or stretching. */
+/** Composes a decoded frame into the project canvas using an explicit, persisted fit policy. */
 export function drawLetterboxedVideoFrame(
   context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   width: number,
   height: number,
   source: TimelineCanvas | null,
+  options: { fit?: 'fit' | 'fill' | 'stretch'; background?: string } = {},
 ): void {
-  context.fillStyle = '#000';
+  context.fillStyle = options.background ?? '#000';
   context.fillRect(0, 0, width, height);
   if (!source || source.width <= 0 || source.height <= 0) return;
-  const scale = Math.min(width / source.width, height / source.height);
-  const drawWidth = source.width * scale;
-  const drawHeight = source.height * scale;
+  const fit = options.fit ?? 'fit';
+  const scaleX = width / source.width;
+  const scaleY = height / source.height;
+  const drawWidth = fit === 'stretch' ? width : source.width * (fit === 'fill' ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY));
+  const drawHeight = fit === 'stretch' ? height : source.height * (fit === 'fill' ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY));
   context.drawImage(source, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
 }
