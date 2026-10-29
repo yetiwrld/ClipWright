@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive, ArrowLeft, ArrowRight, ArrowLeftRight, Check, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Download,
-  CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen, Image as ImageIcon,
+  CircleHelp, Clapperboard, Clock3, Command, FilePlus2, Film, FolderOpen,
   Pause, Play, SkipBack, SkipForward, Undo2, Redo2, Volume2, VolumeX,
   Grid2X2, HardDrive, Heart, Home, Keyboard, Maximize2,
   MoreHorizontal, Minimize2, Plus, Search, Settings2, Sparkles, Sun, Moon, Trash2, Upload, ZoomIn, ZoomOut, Scissors, Magnet,
@@ -11,6 +11,7 @@ import {
 import { createProject, PROJECTS_KEY, readProjectStore, writeProjects } from './lib/projects';
 import { aspectRatioOf } from './lib/aspectRatio';
 import ProjectCanvasSettings from './components/ProjectCanvasSettings';
+import ProjectMediaPanel from './components/ProjectMediaPanel';
 import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS, MAX_STILL_IMAGE_CLIP_DURATION_SECONDS, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, TimelineClip, Track } from './lib/projectDocument';
@@ -3329,50 +3330,30 @@ function EditorFoundation({
     {missingMediaAssets.length > 0 && <div className="missing-media-banner" role="alert"><div><strong>{missingMediaAssets.length} missing media {missingMediaAssets.length === 1 ? 'file' : 'files'}</strong><span>Offline clips are marked on the timeline. Relink each source before exporting; export is disabled while media is missing.</span></div><button className="button button-secondary button-small" type="button" onClick={() => { const asset = missingMediaAssets[0]; if (asset.kind === 'image') onRelinkImage(asset.id); else if (asset.kind === 'audio') onRelinkAudio(asset.id); else onRelinkVideo(asset.id); }} disabled={isReadingMedia}><Upload size={14} />Relink {missingMediaAssets[0].name}</button></div>}
     <div className="editor-layout" ref={editorLayoutRef}>
       <div className={`editor-main-row${mediaPanelCollapsed ? ' media-panel-collapsed' : ''}${propertiesPanelCollapsed ? ' properties-panel-collapsed' : ''}`} style={{ '--media-panel-width': `${mediaPanelWidth}px`, '--properties-panel-width': `${propertiesPanelWidth}px` } as React.CSSProperties}>
-        <aside className={`editor-media-panel${mediaPanelCollapsed ? ' is-collapsed' : ''}`} aria-label="Project media" data-tour="media-bin" aria-busy={isReadingMedia}>
-          <div className="panel-title">
-            {!mediaPanelCollapsed && <span>Project media</span>}
-            <div className="panel-title-tools">
-              <button className="icon-button small" type="button" title={mediaPanelCollapsed ? 'Expand media panel' : 'Collapse media panel'} aria-label={mediaPanelCollapsed ? 'Expand media panel' : 'Collapse media panel'} aria-expanded={!mediaPanelCollapsed} onClick={() => setMediaPanelCollapsed((collapsed) => !collapsed)}>{mediaPanelCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}</button>
-              {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local video" aria-label="Import a local video" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={16} /></button>}
-              {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local audio file" aria-label="Import a local audio file" onClick={onImportAudio} disabled={isReadingMedia || !project}><Volume2 size={14} /></button>}
-              {!mediaPanelCollapsed && <button className="icon-button small" title="Import a local image" aria-label="Import a local image" onClick={onImportImage} disabled={isReadingMedia || !project}><ImageIcon size={14} /></button>}
-            </div>
-          </div>
-          {!mediaPanelCollapsed && <>
-            <label className="media-storage-mode"><span>New media storage</span><select className="select-input" aria-label="New media storage mode" value={mediaImportMode} onChange={(event) => onMediaImportModeChange(event.target.value as 'managed' | 'linked')}><option value="managed" disabled={!hasPersistentLibrary}>Managed copy · stays with project</option><option value="linked">{hasPersistentLibrary ? 'Link external original' : 'Session only · browser'}</option></select></label>
-            {isReadingMedia && <div className="media-reading-status" role="status" aria-live="polite">Reading local media metadata…</div>}
-            {assets.length ? <div className="media-asset-list" aria-label="Media assets">
-              {assets.map((asset) => {
-                const key = projectDocument ? mediaKey(projectDocument.id, asset.id) : '';
-                const available = Boolean(sessionSources[key]);
-                const supported = asset.kind === 'image' || Boolean(asset.streams[asset.kind === 'audio' ? 'audio' : 'video']);
-                const storageLabel = asset.pathKind === 'project-relative' ? 'Managed copy' : asset.pathKind === 'absolute' ? 'Linked original' : 'Session only';
-                return <div className={`media-asset-row ${key === activeKey ? 'is-selected' : ''}`} key={asset.id}>
-                  <button className="media-asset-select" type="button" aria-pressed={key === activeKey} onClick={() => onSelectMedia(key)} disabled={!projectDocument} title={asset.name} draggable={supported} onDragStart={(event) => {
-                    mediaDragSourceRef.current = asset.id;
-                    event.dataTransfer.effectAllowed = 'copy';
-                    event.dataTransfer.setData('application/x-clipwright-source', asset.id);
-                    event.dataTransfer.setData('text/plain', asset.id);
-                  }} onDragEnd={() => { mediaDragSourceRef.current = null; setDropPreview(null); }}>
-                    {asset.kind === 'image' && available ? <img className="media-asset-thumbnail" src={sessionSources[key]?.url} alt="" /> : asset.kind === 'audio' ? <Volume2 size={15} /> : asset.kind === 'image' ? <ImageIcon size={15} /> : <Film size={15} />}<span className="media-asset-copy"><strong>{asset.name}</strong><small>{storageLabel} · {asset.kind === 'image' ? (!available ? 'Relink required' : `${asset.imageDimensions?.width ?? 'Image'} × ${asset.imageDimensions?.height ?? ''} · library item`) : supported ? (!available ? 'Relink required' : `Drag to a ${asset.kind} track`) : `${asset.kind} · library item`}</small></span>
-                  </button>
-                  {asset.pathKind === 'project-relative' && available && <button className="icon-button small media-reveal" type="button" aria-label={`Reveal ${asset.name} in File Explorer`} title="Reveal managed copy in File Explorer" onClick={() => onRevealMedia(asset.id)}><FolderOpen size={14} /></button>}
-                  {asset.kind === 'video' && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkVideo(asset.id)} disabled={isReadingMedia}>Relink</button>}
-                  {asset.kind === 'audio' && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkAudio(asset.id)} disabled={isReadingMedia}>Relink</button>}
-                  {asset.kind === 'image' && !available && <button className="button button-secondary button-small media-relink" type="button" onClick={() => onRelinkImage(asset.id)} disabled={isReadingMedia}>Relink</button>}
-                </div>;
-              })}
-              <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={13} />Add video</button>
-              <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportAudio} disabled={isReadingMedia || !project}><Plus size={13} />Add audio</button>
-              <button className="button button-secondary button-small media-add-button" type="button" onClick={onImportImage} disabled={isReadingMedia || !project}><Plus size={13} />Add image</button>
-            </div> : <div className="media-empty">
-              <div className="media-icon"><Film size={20} /></div><strong>No media imported</strong><span>Choose local video, audio, or image files. Original files are not modified.</span><div className="media-empty-actions"><button className="button button-secondary button-small" onClick={onImportVideo} disabled={isReadingMedia || !project}><Plus size={14} />Import video</button><button className="button button-secondary button-small" onClick={onImportAudio} disabled={isReadingMedia || !project}><Plus size={14} />Import audio</button><button className="button button-secondary button-small" onClick={onImportImage} disabled={isReadingMedia || !project}><Plus size={14} />Import image</button></div>
-            </div>}
-            {isReadingMedia && <div className="media-reading" role="status">Reading metadata in your browser…</div>}
-            <div className="panel-footnote"><HardDrive size={12} />Managed media is copied into this project; linked originals stay in place.</div>
-          </>}
-        </aside>
+        <ProjectMediaPanel
+          assets={assets}
+          projectId={projectDocument?.id ?? null}
+          selectedMediaKey={activeKey}
+          sessionSources={sessionSources}
+          collapsed={mediaPanelCollapsed}
+          isReadingMedia={isReadingMedia}
+          hasPersistentLibrary={hasPersistentLibrary}
+          mediaImportMode={mediaImportMode}
+          onToggleCollapsed={() => setMediaPanelCollapsed((collapsed) => !collapsed)}
+          onImportVideo={onImportVideo}
+          onImportAudio={onImportAudio}
+          onImportImage={onImportImage}
+          onRelinkVideo={onRelinkVideo}
+          onRelinkAudio={onRelinkAudio}
+          onRelinkImage={onRelinkImage}
+          onSelectMedia={onSelectMedia}
+          onRevealMedia={onRevealMedia}
+          onMediaImportModeChange={onMediaImportModeChange}
+          onDragSourceChange={(assetId) => {
+            mediaDragSourceRef.current = assetId;
+            if (!assetId) setDropPreview(null);
+          }}
+        />
         <div className="panel-resize-handle" role="separator" aria-label="Resize Project media panel" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={420} aria-valuenow={mediaPanelWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize(event, 'media')} onPointerMove={movePanelResize} onPointerUp={endPanelResize} onPointerCancel={endPanelResize} onKeyDown={(event) => handlePanelResizeKey(event, 'media')}><span /></div>
         <div className="editor-center">
           <div className="preview-stage">{focusMode && <button className="preview-focus-exit" type="button" aria-label="Exit focus mode" title="Exit focus mode (Esc)" onClick={onToggleFocusMode}><Minimize2 size={15} /><span>Exit focus mode</span></button>}<div className="preview-frame" data-tour="preview" style={{ aspectRatio: `${sequence?.width ?? 16} / ${sequence?.height ?? 9}`, width: 'auto', height: '100%', backgroundColor: sequence?.canvasBackground ?? '#000000' }}>
