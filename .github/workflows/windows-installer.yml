@@ -34,6 +34,7 @@ jobs:
         run: npm run test:desktop
 
       - name: Build Windows NSIS installer
+        id: build-installer
         shell: pwsh
         run: |
           $logPath = Join-Path $env:RUNNER_TEMP 'windows-installer-build.log'
@@ -262,6 +263,15 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ClipWright-Windows-unsigned-x64
+          path: release/ClipWright-Studio-Setup-*-x64.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build-only installer if production smoke fails
+        if: failure() && steps.build-installer.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipWright-Windows-unsigned-x64-UNVALIDATED
           path: release/ClipWright-Studio-Setup-*-x64.exe
           if-no-files-found: error
           retention-days: 14
