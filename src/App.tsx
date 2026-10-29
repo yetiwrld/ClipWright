@@ -15,7 +15,7 @@ import ProjectMediaPanel from './components/ProjectMediaPanel';
 import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, DEFAULT_STILL_IMAGE_CLIP_DURATION_SECONDS, MAX_STILL_IMAGE_CLIP_DURATION_SECONDS, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, TimelineClip, Track } from './lib/projectDocument';
-import { probeBrowserAudio, probeBrowserVideo } from './lib/browserMedia';
+import { probeBrowserAudio, probeBrowserVideo, probeBrowserVideoAudio } from './lib/browserMedia';
 import { exportResolutionLabel, getExportBitrates, getExportDimensions } from './lib/exportResolution';
 import type { ExportQualityPreset, ExportResolutionPreset } from './lib/exportResolution';
 import { prepareLocalMediaFile } from './lib/localMediaImport';
@@ -864,6 +864,7 @@ export default function App() {
     try {
       objectUrl = URL.createObjectURL(file);
       const metadata = await probeBrowserVideo(objectUrl);
+      const embeddedAudioStream = await probeBrowserVideoAudio(file, metadata.durationSeconds);
       const timeBase = targetAsset?.streams.video?.timeBase ?? metadata.timeBase;
       const videoStream: StreamInfo = {
         timeBase,
@@ -889,7 +890,7 @@ export default function App() {
         pathKind: persisted?.pathKind ?? 'browser-session',
         fileSizeBytes: persisted?.fileSizeBytes ?? file.size,
         fingerprint: persisted?.fingerprint,
-        streams: { ...targetAsset?.streams, video: videoStream },
+        streams: { ...targetAsset?.streams, video: videoStream, audio: embeddedAudioStream ?? undefined },
       };
       const updatedDocument: ProjectDocument = {
         ...projectDocument,
@@ -913,11 +914,12 @@ export default function App() {
       setProjects((current) => current.map((entry) => entry.id === projectId ? { ...entry, updatedAt: updatedDocument.metadata.modifiedAt } : entry));
       setSelectedMediaKey(key);
       if (objectUrl) objectUrl = null; // The session source registry now owns the URL and revokes it on replacement/unmount.
-      notify(persisted?.mode === 'managed'
+      const importSummary = persisted?.mode === 'managed'
         ? `Managed copy verified · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`
         : persisted?.mode === 'linked'
           ? `Linked external video · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`
-          : `Session-only video · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`);
+          : `Session-only video · ${safeFileName} · ${metadata.width} × ${metadata.height} · ${metadata.durationSeconds.toFixed(2)} s.`;
+      notify(`${importSummary}${embeddedAudioStream ? ' Embedded audio detected.' : ''}`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not read video metadata in this browser.', 'error');
     } finally {

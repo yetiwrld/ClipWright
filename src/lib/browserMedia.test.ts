@@ -1,5 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { probeBrowserAudio, probeBrowserVideo } from './browserMedia';
+
+const audioProbeMock = vi.hoisted(() => ({
+  track: null as unknown,
+  source: null as unknown,
+  dispose: vi.fn(),
+}));
+
+vi.mock('mediabunny', () => ({
+  ALL_FORMATS: [],
+  BlobSource: class { constructor(readonly blob: Blob) {} },
+  Input: class {
+    constructor(options: { source: unknown }) { audioProbeMock.source = options.source; }
+    async getPrimaryAudioTrack() { return audioProbeMock.track; }
+    dispose() { audioProbeMock.dispose(); }
+  },
+}));
+
+import { probeBrowserAudio, probeBrowserVideo, probeBrowserVideoAudio } from './browserMedia';
 
 describe('browser video metadata probe', () => {
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
@@ -63,6 +80,36 @@ describe('browser video metadata probe', () => {
     });
 
     await expect(probeBrowserAudio('blob:empty-audio')).rejects.toThrow('no finite, readable duration');
+  });
+
+  it('detects and records audio streams embedded in video files for export', async () => {
+    const file = new File(['video with embedded audio'], 'with-audio.mp4', { type: 'video/mp4' });
+    const track = {
+      getDurationFromMetadata: vi.fn().mockResolvedValue(7.5),
+      getSampleRate: vi.fn().mockResolvedValue(48_000),
+      getNumberOfChannels: vi.fn().mockResolvedValue(2),
+    };
+    audioProbeMock.track = track;
+    audioProbeMock.source = null;
+    audioProbeMock.dispose.mockClear();
+
+    await expect(probeBrowserVideoAudio(file, 8)).resolves.toEqual({
+      durationSeconds: 7.5,
+      durationTicks: 7_500_000,
+      timeBase: { numerator: 1, denominator: 1_000_000 },
+      sampleRate: 48_000,
+      channels: 2,
+    });
+    expect(audioProbeMock.source).toMatchObject({ blob: file });
+    expect(audioProbeMock.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns no audio stream for a silent video and still releases the media input', async () => {
+    audioProbeMock.track = null;
+    audioProbeMock.dispose.mockClear();
+
+    await expect(probeBrowserVideoAudio(new File(['silent video'], 'silent.mp4'), 3)).resolves.toBeNull();
+    expect(audioProbeMock.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('times out and cleans up when the browser never returns metadata', async () => {

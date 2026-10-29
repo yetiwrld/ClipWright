@@ -5,6 +5,7 @@ import type { ExportQualityPreset, ExportResolutionPreset } from './exportResolu
 import { validateProjectDocument } from './projectDocument';
 import type { ProjectDocument, Sequence, TimelineClip, Track } from './projectDocument';
 import { mapAudioPartToTimelineChunk } from './timelineAudioFrames';
+import { shouldInspectAudioStream } from './timelineAudioSources';
 import {
   areExportFrameCountsExact,
   encoderConfigDiagnostic,
@@ -122,7 +123,7 @@ export async function exportTimelineProject(request: TimelineExportRequest): Pro
       && !track!.muted
       && !hiddenTrackIds[track!.id]
       && (!soloTrackIds.length || soloTrackIds.includes(track!.id))
-      && (track!.kind === 'audio' || Boolean(asset!.streams.audio)));
+      && shouldInspectAudioStream(track!.kind, asset!.kind, Boolean(asset!.streams.audio)));
   let stage: TimelineExportStage = 'preparing audio sources';
   request.onStage?.(stage);
   try {

@@ -4,6 +4,7 @@ import App from './App';
 import { createProject, PROJECTS_KEY, writeProjects } from './lib/projects';
 import { createProjectDocument, PROJECT_DOCUMENTS_KEY, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { ProjectDocument } from './lib/projectDocument';
+import * as browserMedia from './lib/browserMedia';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -483,6 +484,13 @@ describe('ClipWright foundation UI', () => {
       });
       window.setTimeout(() => this.dispatchEvent(new Event('loadedmetadata')), 0);
     });
+    vi.spyOn(browserMedia, 'probeBrowserVideoAudio').mockResolvedValue({
+      durationSeconds: 8.125,
+      durationTicks: 8_125_000,
+      timeBase: { numerator: 1, denominator: 1_000_000 },
+      sampleRate: 48_000,
+      channels: 2,
+    });
     const file = new File(['local test bytes'], 'sample.mp4', { type: 'video/mp4' });
     fireEvent.change(screen.getByLabelText('Choose a local video file'), { target: { files: [file] } });
 
@@ -496,7 +504,10 @@ describe('ClipWright foundation UI', () => {
       pathKind: 'browser-session',
       kind: 'video',
       fileSizeBytes: file.size,
-      streams: { video: { timeBase: { numerator: 1, denominator: 1_000_000 }, durationTicks: 8_125_000, width: 1280, height: 720, metadataSource: 'browser' } },
+      streams: {
+        video: { timeBase: { numerator: 1, denominator: 1_000_000 }, durationTicks: 8_125_000, width: 1280, height: 720, metadataSource: 'browser' },
+        audio: { timeBase: { numerator: 1, denominator: 1_000_000 }, durationTicks: 8_125_000, sampleRate: 48_000, channels: 2 },
+      },
     });
     expect(JSON.stringify(saved)).not.toContain('blob:clipwright-local-video');
     expect(createObjectURL).toHaveBeenCalledWith(file);

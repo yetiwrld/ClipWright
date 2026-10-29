@@ -168,8 +168,9 @@ function makeTimelineIdentityFixture() {
     pathKind: 'browser-session',
     kind: 'video',
     streams: {
+      // Deliberately omit audio metadata: the exporter must discover embedded audio in video files,
+      // including projects created before embedded audio stream metadata was recorded.
       video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 30, frameRate: TEST_RATE, width: TEST_WIDTH, height: TEST_HEIGHT },
-      ...(id === 'offline' ? {} : { audio: { timeBase: { numerator: 1, denominator: 48_000 }, durationTicks: 48_000, sampleRate: 48_000, channels: 2 } }),
     },
   }));
   const project: ProjectDocument = {

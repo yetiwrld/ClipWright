@@ -1,3 +1,5 @@
+import { ALL_FORMATS, BlobSource, Input } from 'mediabunny';
+
 export type BrowserVideoMetadata = {
   durationSeconds: number;
   durationTicks: number;
@@ -10,6 +12,8 @@ export type BrowserAudioMetadata = {
   durationSeconds: number;
   durationTicks: number;
   timeBase: { numerator: 1; denominator: 1_000_000 };
+  sampleRate?: number;
+  channels?: number;
 };
 
 const MICROSECONDS_PER_SECOND = 1_000_000;
@@ -62,6 +66,33 @@ export function probeBrowserVideo(url: string): Promise<BrowserVideoMetadata> {
       finish(error instanceof Error ? error : new Error('The browser could not open this video source.'));
     }
   });
+}
+
+/** Inspect container metadata for an audio stream embedded in a local video, without decoding the whole file. */
+export async function probeBrowserVideoAudio(file: Blob, fallbackDurationSeconds: number): Promise<BrowserAudioMetadata | null> {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  try {
+    const track = await input.getPrimaryAudioTrack();
+    if (!track) return null;
+    const metadataDuration = await track.getDurationFromMetadata();
+    const durationSeconds = Number.isFinite(metadataDuration) && metadataDuration !== null && metadataDuration > 0
+      ? metadataDuration
+      : fallbackDurationSeconds;
+    const durationTicks = Math.round(durationSeconds * MICROSECONDS_PER_SECOND);
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || !Number.isSafeInteger(durationTicks) || durationTicks <= 0) {
+      throw new Error('The embedded video audio track has no finite, readable duration.');
+    }
+    const [sampleRate, channels] = await Promise.all([track.getSampleRate(), track.getNumberOfChannels()]);
+    return {
+      durationSeconds,
+      durationTicks,
+      timeBase: { numerator: 1, denominator: MICROSECONDS_PER_SECOND },
+      ...(Number.isInteger(sampleRate) && sampleRate >= 8_000 && sampleRate <= 384_000 ? { sampleRate } : {}),
+      ...(Number.isInteger(channels) && channels >= 1 && channels <= 128 ? { channels } : {}),
+    };
+  } finally {
+    input.dispose();
+  }
 }
 
 /** Read the duration of a browser-decodable local audio file without decoding it into memory. */
