@@ -64,7 +64,21 @@ jobs:
           $process = Start-Process -FilePath $appPath -PassThru -Wait -RedirectStandardOutput $smokeStdoutPath -RedirectStandardError $smokeStderrPath
           if ($process.ExitCode -ne 0) {
             if (Test-Path $reportPath) {
-              $details = (Get-Content -Raw $reportPath).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              $failed = Get-Content -Raw $reportPath | ConvertFrom-Json
+              $frame = $failed.frameIdentity
+              $short = [ordered]@{
+                audioDurationSmokePass = $failed.audioDurationSmokePass
+                frameIdentityPass = $frame.pass
+                stage = $frame.stage
+                error = $frame.error
+                expected = $frame.expected
+                counts = $frame.counts
+                actual = $frame.actual
+                mismatchCount = $frame.mismatchCount
+                firstIncorrectFrame = $frame.firstIncorrectFrame
+                mismatches = $frame.mismatches
+              }
+              $details = ($short | ConvertTo-Json -Depth 8 -Compress).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Output "::error title=Packaged smoke diagnostics::$details"
             }
             throw "Packaged application smoke test failed with exit code $($process.ExitCode)."

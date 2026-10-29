@@ -413,6 +413,8 @@ async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
         firstVideoTimestampError: result.measurements.firstVideoTimestampError,
         decodedSampleFrames: result.measurements.decodedSampleFrames,
         audioSampleRate: audioAnalysis.sampleRate,
+        audioSignalOnsetsSeconds: audioAnalysis.onsetsSeconds,
+        videoSyncFlashFrames: actualFlashFrames,
         audioOnsetMatches,
         avSyncChecks,
         encoderConfiguration: result.encoderConfiguration,
@@ -613,6 +615,7 @@ export async function runDeterministicWebmSmoke(reportProgress: SmokeProgress = 
   reportProgress('all packaged WebM smoke checks complete');
   return {
     ...audio,
+    audioDurationSmokePass: audio.pass,
     pass: audio.pass && frameIdentity.report.pass,
     frameIdentity: frameIdentity.report,
     artifacts: frameIdentity.artifacts,
