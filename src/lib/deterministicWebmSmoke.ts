@@ -1,13 +1,26 @@
 import { ALL_FORMATS, AudioBufferSink, BufferSource, CanvasSink, Input } from 'mediabunny';
-import { areExportFrameCountsExact, createSequenceExportPlan, encodeDeterministicWebm } from './deterministicWebmExport';
-import { CANVAS_TIMESTAMP_EPSILON_SECONDS, drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './timelineVideoFrames';
-import { validateProjectDocument } from './projectDocument';
+import {
+  OPUS_PACKET_DURATION_SECONDS,
+  WEBM_TIMEBASE_SECONDS,
+  areExportFrameCountsExact,
+  audioDurationToleranceSeconds,
+  audioOnsetToleranceSeconds,
+  createSequenceExportPlan,
+  encodeDeterministicWebm,
+  videoTimestampToleranceSeconds,
+} from './deterministicWebmExport';
+import { exportTimelineProject } from './timelineExport';
+import { parseProjectDocument, serializeProjectDocument, validateProjectDocument } from './projectDocument';
 import type { MediaAsset, ProjectDocument, TimelineClip, Track } from './projectDocument';
 
 const TEST_RATE = { numerator: 30, denominator: 1 };
 const TEST_WIDTH = 320;
 const TEST_HEIGHT = 180;
 const IDENTITY_BIT_COUNT = 6;
+const IDENTITY_AUDIO_PULSES = {
+  A: [{ frameIndex: 6, frequencyHz: 440 }, { frameIndex: 15, frequencyHz: 440 }, { frameIndex: 23, frequencyHz: 440 }],
+  B: [{ frameIndex: 5, frequencyHz: 660 }, { frameIndex: 14, frequencyHz: 660 }],
+} as const;
 type SmokeProgress = (stage: string) => void;
 const reportNoop: SmokeProgress = () => undefined;
 
@@ -20,9 +33,14 @@ function drawIdentityFrame(context: CanvasRenderingContext2D, sourceId: 'A' | 'B
     context.fillStyle = (frameIndex >> bit) & 1 ? '#ffffff' : '#080808';
     context.fillRect(58 + bit * 36, 64, 28, 48);
   }
+  const sourcePulseFrames: readonly number[] = IDENTITY_AUDIO_PULSES[sourceId].map((pulse) => pulse.frameIndex);
+  if (sourcePulseFrames.includes(frameIndex)) {
+    context.fillStyle = '#ffffff';
+    context.fillRect(274, 8, 40, 40);
+  }
 }
 
-type FrameIdentity = { sourceId: 'A' | 'B' | null; frameIndex: number | null; isGap: boolean };
+type FrameIdentity = { sourceId: 'A' | 'B' | null; frameIndex: number | null; isGap: boolean; hasSyncFlash: boolean };
 type TimedFrameIdentity = { timestampSeconds: number; identity: FrameIdentity };
 
 function readIdentity(canvas: HTMLCanvasElement | OffscreenCanvas): FrameIdentity {
@@ -38,14 +56,16 @@ function readIdentity(canvas: HTMLCanvasElement | OffscreenCanvas): FrameIdentit
   if (markerRed > 170 && markerGreen > 65 && markerGreen < 165 && markerBlue < 130) sourceId = 'B';
   const [backgroundRed, backgroundGreen, backgroundBlue] = sample(306, 164);
   const isGap = !sourceId && Math.max(backgroundRed, backgroundGreen, backgroundBlue) < 20;
-  if (isGap) return { sourceId: null, frameIndex: null, isGap: true };
-  if (!sourceId) return { sourceId: null, frameIndex: null, isGap: false };
+  if (isGap) return { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
+  const [flashRed, flashGreen, flashBlue] = sample(294, 28);
+  const hasSyncFlash = flashRed > 190 && flashGreen > 190 && flashBlue > 190;
+  if (!sourceId) return { sourceId: null, frameIndex: null, isGap: false, hasSyncFlash };
   let frameIndex = 0;
   for (let bit = 0; bit < IDENTITY_BIT_COUNT; bit += 1) {
     const [red, green, blue] = sample(72 + bit * 36, 88);
     if (Math.max(red, green, blue) > 150) frameIndex |= 1 << bit;
   }
-  return { sourceId, frameIndex, isGap: false };
+  return { sourceId, frameIndex, isGap: false, hasSyncFlash };
 }
 
 async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokeProgress) {
@@ -56,16 +76,38 @@ async function encodeIdentitySource(sourceId: 'A' | 'B', reportProgress: SmokePr
   const context = canvas.getContext('2d', { alpha: false });
   if (!context) throw new Error('Could not create a frame-identity source canvas.');
   const plan = createSequenceExportPlan(30, TEST_RATE);
+  const sampleRate = 48_000;
+  const audioContext = new OfflineAudioContext(2, 24_000, sampleRate);
+  const sourcePulses = IDENTITY_AUDIO_PULSES[sourceId].map((pulse) => ({
+    startSeconds: pulse.frameIndex / TEST_RATE.numerator,
+    endSeconds: (pulse.frameIndex + 2) / TEST_RATE.numerator,
+    frequencyHz: pulse.frequencyHz,
+  }));
   const result = await encodeDeterministicWebm({
     canvas,
     plan,
     videoBitrate: 800_000,
     audioBitrate: 64_000,
-    includeAudio: false,
+    includeAudio: true,
     signal: new AbortController().signal,
     drawFrame: async (frameIndex) => drawIdentityFrame(context, sourceId, frameIndex),
+    renderAudioChunk: async (startSeconds, durationSeconds) => {
+      const sampleCount = Math.max(1, Math.round(durationSeconds * sampleRate));
+      const audioBuffer = audioContext.createBuffer(2, sampleCount, sampleRate);
+      const left = audioBuffer.getChannelData(0);
+      const right = audioBuffer.getChannelData(1);
+      for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+        const timestamp = startSeconds + sampleIndex / sampleRate;
+        const pulse = sourcePulses.find((item) => timestamp >= item.startSeconds && timestamp < item.endSeconds);
+        if (!pulse) continue;
+        const value = 0.65 * Math.sin(2 * Math.PI * pulse.frequencyHz * (timestamp - pulse.startSeconds));
+        left[sampleIndex] = value;
+        right[sampleIndex] = value;
+      }
+      return audioBuffer;
+    },
   });
-  if (!areExportFrameCountsExact(30, { ...result.counts, outputFile: result.measurements.outputVideoFrames })) {
+  if (!areExportFrameCountsExact(30, { ...result.counts, outputFilePackets: result.measurements.outputVideoPackets })) {
     throw new Error(`The ${sourceId} frame-identity source did not encode exactly 30 frames.`);
   }
   return result.buffer;
@@ -92,7 +134,10 @@ function makeTimelineIdentityFixture() {
     sourcePath: `${id}.webm`,
     pathKind: 'browser-session',
     kind: 'video',
-    streams: { video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 30, frameRate: TEST_RATE, width: TEST_WIDTH, height: TEST_HEIGHT } },
+    streams: {
+      video: { timeBase: { numerator: 1, denominator: 30 }, durationTicks: 30, frameRate: TEST_RATE, width: TEST_WIDTH, height: TEST_HEIGHT },
+      ...(id === 'offline' ? {} : { audio: { timeBase: { numerator: 1, denominator: 48_000 }, durationTicks: 48_000, sampleRate: 48_000, channels: 2 } }),
+    },
   }));
   const project: ProjectDocument = {
     schemaVersion: 2,
@@ -135,102 +180,280 @@ async function inspectFrameIdentities(
   }
 }
 
-async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
-  const sourceA = await encodeIdentitySource('A', reportProgress);
-  const sourceB = await encodeIdentitySource('B', reportProgress);
-  const sourceBuffers = new Map<string, ArrayBuffer>([['A', sourceA], ['B', sourceB]]);
-  const sourceFrameIdentities = new Map<string, TimedFrameIdentity[]>();
-  for (const [sourceId, sourceBuffer] of sourceBuffers) {
-    sourceFrameIdentities.set(sourceId, await inspectFrameIdentities(sourceBuffer, reportProgress, `synthetic source ${sourceId}`));
+const EXPECTED_IDENTITY_PLACEMENTS = [
+  { startFrame: 0, endFrame: 10, sourceId: 'A' as const, sourceFrameStart: 5 },
+  { startFrame: 10, endFrame: 20, sourceId: 'A' as const, sourceFrameStart: 15 },
+  { startFrame: 20, endFrame: 32, sourceId: 'B' as const, sourceFrameStart: 0 },
+  { startFrame: 32, endFrame: 40, sourceId: 'B' as const, sourceFrameStart: 12 },
+  { startFrame: 50, endFrame: 65, sourceId: 'A' as const, sourceFrameStart: 10 },
+];
+const EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS = [1, 10, 25, 34, 55, 63].map((frameIndex) => frameIndex / 30);
+const EXPECTED_FLASH_FRAME_INDEXES = [1, 10, 25, 34, 55, 63];
+const AUDIO_ACTIVITY_THRESHOLD = 0.18;
+const AUDIO_ACTIVITY_GAP_SECONDS = 0.025;
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
   }
-  const readers = new Map<string, Awaited<ReturnType<typeof openVideoFrameReader>>>();
-  const { tracks, clips, frameCount } = makeTimelineIdentityFixture();
-  const plan = createSequenceExportPlan(frameCount, TEST_RATE);
-  const canvas = document.createElement('canvas');
-  canvas.width = TEST_WIDTH;
-  canvas.height = TEST_HEIGHT;
-  const context = canvas.getContext('2d', { alpha: false });
-  if (!context) throw new Error('Could not create the frame-identity export canvas.');
+  return btoa(binary);
+}
+
+function stringToBase64(text: string) {
+  return arrayBufferToBase64(new TextEncoder().encode(text).buffer);
+}
+
+async function measureTimelineAudioOnsets(buffer: ArrayBuffer) {
+  const input = new Input({ source: new BufferSource(buffer), formats: ALL_FORMATS });
   try {
-    reportProgress('encoding 65-frame timeline identity output');
-    const result = await encodeDeterministicWebm({
-      canvas,
-      plan,
-      videoBitrate: 800_000,
-      audioBitrate: 64_000,
-      includeAudio: false,
+    const track = await input.getPrimaryAudioTrack();
+    if (!track) throw new Error('The production timeline export has no audio track for its embedded-audio fixture.');
+    const sink = new AudioBufferSink(track);
+    const onsets: number[] = [];
+    let sampleRate: number | null = null;
+    let lastActiveTimestamp = -Infinity;
+    for await (const part of sink.buffers()) {
+      sampleRate = part.buffer.sampleRate;
+      const channel = part.buffer.getChannelData(0);
+      for (let sampleIndex = 0; sampleIndex < channel.length; sampleIndex += 1) {
+        if (Math.abs(channel[sampleIndex]) <= AUDIO_ACTIVITY_THRESHOLD) continue;
+        const timestamp = part.timestamp + sampleIndex / part.buffer.sampleRate;
+        if (timestamp - lastActiveTimestamp > AUDIO_ACTIVITY_GAP_SECONDS) onsets.push(timestamp);
+        lastActiveTimestamp = timestamp;
+      }
+    }
+    if (!sampleRate) throw new Error('The production timeline export audio track could not be decoded.');
+    return { sampleRate, onsetsSeconds: onsets };
+  } finally {
+    input.dispose();
+  }
+}
+
+async function runFrameIdentitySmoke(reportProgress: SmokeProgress) {
+  let sourceA: ArrayBuffer | null = null;
+  let sourceB: ArrayBuffer | null = null;
+  let projectSnapshot = '';
+  let fixtureMetadata: Record<string, unknown> | null = null;
+  let outputBuffer: ArrayBuffer | null = null;
+  let stage = 'encoding synthetic source media';
+  let projectId = 'frame-identity-project';
+  try {
+    sourceA = await encodeIdentitySource('A', reportProgress);
+    sourceB = await encodeIdentitySource('B', reportProgress);
+    const sourceBuffers = new Map<'A' | 'B', ArrayBuffer>([['A', sourceA], ['B', sourceB]]);
+    for (const [sourceId, sourceBuffer] of sourceBuffers) {
+      const decoded = await inspectFrameIdentities(sourceBuffer, reportProgress, `synthetic source ${sourceId}`);
+      const sourcePulses = IDENTITY_AUDIO_PULSES[sourceId];
+      const invalidSourceFrame = decoded.find((frame, index) => frame.identity.sourceId !== sourceId
+        || frame.identity.frameIndex !== index
+        || frame.identity.hasSyncFlash !== sourcePulses.some((pulse) => pulse.frameIndex === index));
+      if (decoded.length !== 30 || invalidSourceFrame) {
+        throw new Error(`Synthetic source ${sourceId} is not a complete 30-frame video/audio fixture; decoded=${decoded.length}, firstBad=${JSON.stringify(invalidSourceFrame ?? null)}.`);
+      }
+    }
+
+    stage = 'serializing and validating saved project snapshot';
+    reportProgress(stage);
+    const fixture = makeTimelineIdentityFixture();
+    projectId = fixture.project.id;
+    projectSnapshot = serializeProjectDocument(fixture.project);
+    const savedProject = parseProjectDocument(projectSnapshot);
+    const sourceBlobs = new Map<string, Blob>([
+      ['A', new Blob([sourceA], { type: 'video/webm' })],
+      ['B', new Blob([sourceB], { type: 'video/webm' })],
+    ]);
+    const plan = createSequenceExportPlan(savedProject.sequences[0].durationFrames, savedProject.sequences[0].frameRate);
+    fixtureMetadata = {
+      fixtureVersion: 1,
+      projectSnapshotFile: 'saved-project.json',
+      sourceFiles: ['source-A.webm', 'source-B.webm'],
+      outputFile: 'timeline-export.webm',
+      frameRate: TEST_RATE,
+      width: TEST_WIDTH,
+      height: TEST_HEIGHT,
+      expectedFrameCount: 65,
+      expectedDurationSeconds: plan.durationSeconds,
+      expectedPlacements: EXPECTED_IDENTITY_PLACEMENTS,
+      expectedGapFrames: Array.from({ length: 5 }, (_, offset) => 40 + offset),
+      expectedOfflineFrames: Array.from({ length: 5 }, (_, offset) => 45 + offset),
+      expectedAudioPulseOnsetsSeconds: EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS,
+      expectedFlashFrameIndexes: EXPECTED_FLASH_FRAME_INDEXES,
+      timingPolicy: {
+        matroskaTimecodeScaleNanoseconds: 1_000_000,
+        videoTimestampToleranceSeconds: videoTimestampToleranceSeconds(plan.frameDurationSeconds, WEBM_TIMEBASE_SECONDS),
+        opusPacketDurationSeconds: OPUS_PACKET_DURATION_SECONDS,
+        audioOnsetToleranceSeconds: audioOnsetToleranceSeconds(48_000, OPUS_PACKET_DURATION_SECONDS, WEBM_TIMEBASE_SECONDS),
+      },
+    };
+
+    stage = 'executing production saved-project timeline export';
+    reportProgress(stage);
+    const result = await exportTimelineProject({
+      projectSnapshot: savedProject,
+      sourceBlobs,
+      sequenceId: savedProject.projectSettings.defaultSequenceId,
+      resolution: 'sequence',
+      quality: 'standard',
       signal: new AbortController().signal,
-      drawFrame: async (frameIndex, timelineTimestamp) => {
-        if (frameIndex % 10 === 0 || frameIndex === frameCount - 1) reportProgress(`composing timeline identity frame ${frameIndex + 1}/${frameCount}`);
-        const clip = selectActiveVideoClip(clips, tracks, timelineTimestamp);
-        let sourceCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
-        if (clip && sourceBuffers.has(clip.sourceId)) {
-          let reader = readers.get(clip.sourceId);
-          if (!reader) {
-            reportProgress(`opening source ${clip.sourceId} frame reader`);
-            const bytes = sourceBuffers.get(clip.sourceId)!;
-            reader = await openVideoFrameReader(new Blob([bytes], { type: 'video/webm' }));
-            readers.set(clip.sourceId, reader);
-          }
-          reportProgress(`requesting source ${clip.sourceId} frame at ${sourceTimeForTimelineClip(clip, timelineTimestamp).toFixed(6)}s`);
-          const decoded = await reader.getCanvasAt(sourceTimeForTimelineClip(clip, timelineTimestamp));
-          reportProgress(`decoded source ${clip.sourceId} frame for timeline frame ${frameIndex + 1}`);
-          sourceCanvas = decoded?.canvas ?? null;
+      onStage: (nextStage) => { stage = nextStage; reportProgress(nextStage); },
+      onProgress: (counts) => {
+        if (counts.submitted && (counts.submitted % 10 === 0 || counts.submitted === plan.frameCount)) {
+          reportProgress(`production export submitted frame ${counts.submitted}/${plan.frameCount}`);
         }
-        drawLetterboxedVideoFrame(context, canvas.width, canvas.height, sourceCanvas);
       },
     });
-    reportProgress('finalized timeline output; decoding frame identities');
-    const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress, 'finalized timeline output');
-    const expectedFrameIdentities: FrameIdentity[] = Array.from({ length: frameCount }, (_, frameIndex) => {
-      const timestamp = plan.timestampSeconds(frameIndex);
-      const clip = selectActiveVideoClip(clips, tracks, timestamp);
-      if (!clip || !sourceBuffers.has(clip.sourceId)) return { sourceId: null, frameIndex: null, isGap: true };
-      const sourceTimestamp = sourceTimeForTimelineClip(clip, timestamp);
-      const sourceFrames = sourceFrameIdentities.get(clip.sourceId) ?? [];
-      let selectedSourceFrame: TimedFrameIdentity | null = null;
-      for (const sourceFrame of sourceFrames) {
-        if (sourceFrame.timestampSeconds <= sourceTimestamp + CANVAS_TIMESTAMP_EPSILON_SECONDS) selectedSourceFrame = sourceFrame;
-        else break;
-      }
-      return selectedSourceFrame?.identity ?? { sourceId: null, frameIndex: null, isGap: true };
+    outputBuffer = result.buffer;
+
+    stage = 'independently checking decoded production export';
+    reportProgress(stage);
+    const fileFrameIdentities = await inspectFrameIdentities(result.buffer, reportProgress, 'production saved-project output');
+    const expectedFrameIdentities: FrameIdentity[] = Array.from({ length: plan.frameCount }, (_, frameIndex) => {
+      const placement = EXPECTED_IDENTITY_PLACEMENTS.find(({ startFrame, endFrame }) => frameIndex >= startFrame && frameIndex < endFrame);
+      if (!placement) return { sourceId: null, frameIndex: null, isGap: true, hasSyncFlash: false };
+      const sourceFrameIndex = placement.sourceFrameStart + frameIndex - placement.startFrame;
+      const sourcePulses = IDENTITY_AUDIO_PULSES[placement.sourceId];
+      return {
+        sourceId: placement.sourceId,
+        frameIndex: sourceFrameIndex,
+        isGap: false,
+        hasSyncFlash: sourcePulses.some((pulse) => pulse.frameIndex === sourceFrameIndex),
+      };
     });
+    const timestampToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / result.measurements.videoTimeResolution);
     const mismatches = expectedFrameIdentities.flatMap((expected, index) => {
       const actual = fileFrameIdentities[index]?.identity;
-      if (actual && actual.isGap === expected.isGap && actual.sourceId === expected.sourceId && actual.frameIndex === expected.frameIndex) return [];
-      return [{ outputFrame: index, expected, actual: actual ?? null }];
+      const actualTimestampSeconds = fileFrameIdentities[index]?.timestampSeconds;
+      const expectedTimestampSeconds = plan.timestampSeconds(index);
+      const timestampErrorSeconds = actualTimestampSeconds === undefined ? null : actualTimestampSeconds - expectedTimestampSeconds;
+      if (actual && actual.isGap === expected.isGap && actual.sourceId === expected.sourceId && actual.frameIndex === expected.frameIndex
+        && actual.hasSyncFlash === expected.hasSyncFlash
+        && timestampErrorSeconds !== null && Math.abs(timestampErrorSeconds) <= timestampToleranceSeconds) return [];
+      return [{ outputFrame: index, expectedTimestampSeconds, actualTimestampSeconds: actualTimestampSeconds ?? null, timestampErrorSeconds, expected, actual: actual ?? null }];
     });
-    const countsMatch = areExportFrameCountsExact(frameCount, {
+    const countsMatch = areExportFrameCountsExact(plan.frameCount, {
       ...result.counts,
-      outputFile: result.measurements.outputVideoFrames,
+      outputFilePackets: result.measurements.outputVideoPackets,
     });
     const videoDurationDeltaSeconds = result.measurements.outputVideoDurationSeconds - plan.durationSeconds;
     const containerDurationDeltaSeconds = result.measurements.outputContainerDurationSeconds - plan.durationSeconds;
-    const durationToleranceSeconds = plan.frameDurationSeconds;
-    return {
-      pass: countsMatch
-        && fileFrameIdentities.length === frameCount
-        && mismatches.length === 0
-        && Math.abs(videoDurationDeltaSeconds) <= durationToleranceSeconds
-        && Math.abs(containerDurationDeltaSeconds) <= durationToleranceSeconds,
-      expected: { frames: frameCount, frameRate: TEST_RATE, durationSeconds: plan.durationSeconds, durationToleranceSeconds },
+    const videoDurationToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / result.measurements.videoTimeResolution);
+    const audioDurationDeltaSeconds = result.measurements.outputAudioDurationSeconds === null
+      ? null
+      : result.measurements.outputAudioDurationSeconds - plan.durationSeconds;
+    const audioDurationTolSeconds = audioDurationToleranceSeconds(48_000, OPUS_PACKET_DURATION_SECONDS, result.measurements.audioTimeResolution ? 1 / result.measurements.audioTimeResolution : WEBM_TIMEBASE_SECONDS);
+    const containerDurationToleranceSeconds = Math.max(videoDurationToleranceSeconds, audioDurationTolSeconds);
+    const audioAnalysis = await measureTimelineAudioOnsets(result.buffer);
+    const audioOnsetTolerance = audioOnsetToleranceSeconds(audioAnalysis.sampleRate, OPUS_PACKET_DURATION_SECONDS, result.measurements.audioTimeResolution ? 1 / result.measurements.audioTimeResolution : WEBM_TIMEBASE_SECONDS);
+    const audioOnsetMatches = EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS.map((expectedSeconds, index) => {
+      const actualSeconds = audioAnalysis.onsetsSeconds[index] ?? null;
+      const errorSeconds = actualSeconds === null ? null : actualSeconds - expectedSeconds;
+      return { index, expectedSeconds, actualSeconds, errorSeconds, passed: errorSeconds !== null && Math.abs(errorSeconds) <= audioOnsetTolerance };
+    });
+    const actualFlashFrames = fileFrameIdentities.flatMap((frame, index) => frame.identity.hasSyncFlash ? [{ frameIndex: index, timestampSeconds: frame.timestampSeconds }] : []);
+    const avSyncChecks = EXPECTED_FLASH_FRAME_INDEXES.map((frameIndex, index) => {
+      const videoFlash = actualFlashFrames[index];
+      const actualAudio = audioAnalysis.onsetsSeconds[index];
+      const expectedVideoSeconds = plan.timestampSeconds(frameIndex);
+      const measuredOffsetSeconds = videoFlash && actualAudio !== undefined ? actualAudio - videoFlash.timestampSeconds : null;
+      return {
+        frameIndex,
+        expectedVideoSeconds,
+        actualVideoSeconds: videoFlash?.timestampSeconds ?? null,
+        actualAudioSeconds: actualAudio ?? null,
+        audioMinusVideoSeconds: measuredOffsetSeconds,
+        passed: measuredOffsetSeconds !== null && Math.abs(measuredOffsetSeconds) <= audioOnsetTolerance,
+      };
+    });
+    const audioPass = result.expectedAudioTrack
+      && (result.measurements.outputAudioPackets ?? 0) > 0
+      && audioAnalysis.onsetsSeconds.length === EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS.length
+      && audioOnsetMatches.every(({ passed }) => passed)
+      && actualFlashFrames.length === EXPECTED_FLASH_FRAME_INDEXES.length
+      && avSyncChecks.every(({ passed }) => passed);
+    const videoPass = countsMatch
+      && fileFrameIdentities.length === plan.frameCount
+      && mismatches.length === 0
+      && result.measurements.videoTimestampsMonotonic
+      && result.measurements.firstVideoTimestampError === null
+      && Math.abs(videoDurationDeltaSeconds) <= videoDurationToleranceSeconds
+      && Math.abs(containerDurationDeltaSeconds) <= containerDurationToleranceSeconds;
+    const report = {
+      pass: videoPass && audioPass,
+      stage,
+      fixture: 'saved-project-timeline-audio-video-identity',
+      projectId: result.projectId,
+      sequenceId: result.sequenceId,
+      expected: {
+        frames: plan.frameCount,
+        frameRate: TEST_RATE,
+        durationSeconds: plan.durationSeconds,
+        videoTimestampToleranceSeconds,
+        audioDurationToleranceSeconds: audioDurationTolSeconds,
+        audioOnsetToleranceSeconds: audioOnsetTolerance,
+        expectedAudioPulseOnsetsSeconds: EXPECTED_TIMELINE_AUDIO_PULSES_SECONDS,
+        expectedFlashFrameIndexes: EXPECTED_FLASH_FRAME_INDEXES,
+      },
+      counts: { ...result.counts, outputVideoPackets: result.measurements.outputVideoPackets, decodedVideoFrames: fileFrameIdentities.length },
       actual: {
-        decodedFileFrames: fileFrameIdentities.length,
         videoDurationSeconds: result.measurements.outputVideoDurationSeconds,
         videoDurationDeltaSeconds,
         containerDurationSeconds: result.measurements.outputContainerDurationSeconds,
         containerDurationDeltaSeconds,
+        expectedAudioTrack: result.expectedAudioTrack,
+        audioDurationSeconds: result.measurements.outputAudioDurationSeconds,
+        audioDurationDeltaSeconds,
+        outputAudioPackets: result.measurements.outputAudioPackets,
+        videoTimeResolution: result.measurements.videoTimeResolution,
+        audioTimeResolution: result.measurements.audioTimeResolution,
+        outputAudioSampleRate: result.measurements.outputAudioSampleRate,
+        videoTimestampsMonotonic: result.measurements.videoTimestampsMonotonic,
+        firstVideoTimestampError: result.measurements.firstVideoTimestampError,
+        decodedSampleFrames: result.measurements.decodedSampleFrames,
+        audioSampleRate: audioAnalysis.sampleRate,
+        audioOnsetMatches,
+        avSyncChecks,
+        encoderConfiguration: result.encoderConfiguration,
+        outputDimensions: result.outputDimensions,
       },
       mismatchCount: mismatches.length,
       mismatches: mismatches.slice(0, 12),
-      gapFrameIndexes: Array.from({ length: frameCount }, (_, index) => index).filter((index) => !selectActiveVideoClip(clips, tracks, plan.timestampSeconds(index))),
-      offlineFrameIndexes: Array.from({ length: frameCount }, (_, index) => index).filter((index) => {
-        const clip = selectActiveVideoClip(clips, tracks, plan.timestampSeconds(index));
-        return Boolean(clip && !sourceBuffers.has(clip.sourceId));
-      }),
+      firstIncorrectFrame: mismatches[0] ?? null,
+      gapFrameIndexes: [40, 41, 42, 43, 44],
+      offlineFrameIndexes: [45, 46, 47, 48, 49],
     };
-  } finally {
-    for (const reader of readers.values()) await reader.dispose();
+    const sourceBase64 = { A: arrayBufferToBase64(sourceA), B: arrayBufferToBase64(sourceB) };
+    const artifacts = {
+      'source-A.webm': sourceBase64.A,
+      'source-B.webm': sourceBase64.B,
+      'saved-project.json': stringToBase64(projectSnapshot),
+      'fixture.json': stringToBase64(JSON.stringify(fixtureMetadata, null, 2)),
+      'timeline-export.webm': arrayBufferToBase64(result.buffer),
+    };
+    return { report, artifacts };
+  } catch (error) {
+    const artifacts: Record<string, string> = {};
+    if (sourceA) artifacts['source-A.webm'] = arrayBufferToBase64(sourceA);
+    if (sourceB) artifacts['source-B.webm'] = arrayBufferToBase64(sourceB);
+    if (projectSnapshot) artifacts['saved-project.json'] = stringToBase64(projectSnapshot);
+    if (fixtureMetadata) artifacts['fixture.json'] = stringToBase64(JSON.stringify(fixtureMetadata, null, 2));
+    if (outputBuffer) artifacts['timeline-export.webm'] = arrayBufferToBase64(outputBuffer);
+    return {
+      report: {
+        pass: false,
+        fixture: 'saved-project-timeline-audio-video-identity',
+        stage,
+        projectId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : null,
+        localValidationDiagnostics: error && typeof error === 'object' && 'exportDiagnostics' in error
+          ? (error as Error & { exportDiagnostics?: unknown }).exportDiagnostics ?? null
+          : null,
+      },
+      artifacts,
+    };
   }
 }
 
@@ -289,10 +512,10 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
   if (!context) throw new Error('The packaged renderer could not create a WebM smoke-test canvas.');
   const sampleRate = 48_000;
   const offlineAudio = new OfflineAudioContext(2, sampleRate, sampleRate);
-  const audioPulseStartSeconds = 0.25;
-  const audioPulseEndSeconds = 0.30;
   const videoFlashFrameIndex = 8;
   const videoFlashTimestampSeconds = plan.timestampSeconds(videoFlashFrameIndex);
+  const audioPulseStartSeconds = videoFlashTimestampSeconds;
+  const audioPulseEndSeconds = audioPulseStartSeconds + 0.05;
   const result = await encodeDeterministicWebm({
     canvas,
     plan,
@@ -328,7 +551,10 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
     },
   });
   const expectedDuration = plan.durationSeconds;
-  const tolerance = plan.frameDurationSeconds;
+  const videoToleranceSeconds = videoTimestampToleranceSeconds(plan.frameDurationSeconds, 1 / result.measurements.videoTimeResolution);
+  const audioToleranceSeconds = audioDurationToleranceSeconds(sampleRate, OPUS_PACKET_DURATION_SECONDS, result.measurements.audioTimeResolution ? 1 / result.measurements.audioTimeResolution : WEBM_TIMEBASE_SECONDS);
+  const containerToleranceSeconds = Math.max(videoToleranceSeconds, audioToleranceSeconds);
+  const avOffsetToleranceSeconds = audioOnsetToleranceSeconds(sampleRate, OPUS_PACKET_DURATION_SECONDS, result.measurements.audioTimeResolution ? 1 / result.measurements.audioTimeResolution : WEBM_TIMEBASE_SECONDS);
   const videoDelta = result.measurements.outputVideoDurationSeconds - expectedDuration;
   const audioDelta = result.measurements.outputAudioDurationSeconds === null ? null : result.measurements.outputAudioDurationSeconds - expectedDuration;
   const containerDelta = result.measurements.outputContainerDurationSeconds - expectedDuration;
@@ -337,19 +563,22 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
   const avOffsetErrorSeconds = avOffset.audioMinusVideoOffsetSeconds - expectedAvOffsetSeconds;
   const countsMatch = areExportFrameCountsExact(plan.frameCount, {
     ...result.counts,
-    outputFile: result.measurements.outputVideoFrames,
+    outputFilePackets: result.measurements.outputVideoPackets,
   });
-  const durationsMatch = Math.abs(videoDelta) <= tolerance
-    && audioDelta !== null && Math.abs(audioDelta) <= tolerance
-    && Math.abs(containerDelta) <= tolerance;
-  const avOffsetMatch = Math.abs(avOffsetErrorSeconds) <= tolerance;
+  const durationsMatch = Math.abs(videoDelta) <= videoToleranceSeconds
+    && audioDelta !== null && Math.abs(audioDelta) <= audioToleranceSeconds
+    && Math.abs(containerDelta) <= containerToleranceSeconds;
+  const avOffsetMatch = Math.abs(avOffsetErrorSeconds) <= avOffsetToleranceSeconds;
   return {
     pass: countsMatch && durationsMatch && avOffsetMatch,
     expected: {
       frameRate,
       frameCount: plan.frameCount,
       frameAlignedVideoDurationSeconds: expectedDuration,
-      oneFrameToleranceSeconds: tolerance,
+      videoTimestampToleranceSeconds,
+      audioDurationToleranceSeconds: audioToleranceSeconds,
+      containerDurationToleranceSeconds: containerToleranceSeconds,
+      audioVideoSignalOffsetToleranceSeconds: avOffsetToleranceSeconds,
       audioPulseStartSeconds,
       videoFlashTimestampSeconds,
       audioMinusVideoOffsetSeconds: expectedAvOffsetSeconds,
@@ -359,11 +588,11 @@ async function runAudioDurationSmoke(reportProgress: SmokeProgress) {
       rendered: result.counts.rendered,
       submitted: result.counts.submitted,
       encoded: result.counts.encoded,
-      outputFile: result.measurements.outputVideoFrames,
+      outputFilePackets: result.measurements.outputVideoPackets,
     },
     actual: {
       mimeType: result.measurements.mimeType,
-      measuredVideoFrameRate: result.measurements.outputVideoFrameRate,
+      measuredVideoPacketRate: result.measurements.outputVideoPacketRate,
       videoDurationSeconds: result.measurements.outputVideoDurationSeconds,
       videoDurationDeltaSeconds: videoDelta,
       audioDurationSeconds: result.measurements.outputAudioDurationSeconds,
@@ -384,7 +613,8 @@ export async function runDeterministicWebmSmoke(reportProgress: SmokeProgress = 
   reportProgress('all packaged WebM smoke checks complete');
   return {
     ...audio,
-    pass: audio.pass && frameIdentity.pass,
-    frameIdentity,
+    pass: audio.pass && frameIdentity.report.pass,
+    frameIdentity: frameIdentity.report,
+    artifacts: frameIdentity.artifacts,
   };
 }

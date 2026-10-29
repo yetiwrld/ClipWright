@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { areExportFrameCountsExact, createSequenceExportPlan, frameCountForEndTime, runExactFramePipeline } from './deterministicWebmExport';
+import {
+  OPUS_PACKET_DURATION_SECONDS,
+  areExportFrameCountsExact,
+  audioDurationToleranceSeconds,
+  audioOnsetToleranceSeconds,
+  createSequenceExportPlan,
+  frameCountForEndTime,
+  runExactFramePipeline,
+  videoTimestampToleranceSeconds,
+} from './deterministicWebmExport';
 
 describe('deterministic sequence export plan', () => {
   it('plans exact 30 fps and 60 fps sequences from sequence frame counts', () => {
@@ -16,6 +25,24 @@ describe('deterministic sequence export plan', () => {
     expect(frameCountForEndTime(22.21, { numerator: 30, denominator: 1 })).toBe(667);
     expect(frameCountForEndTime(10, { numerator: 30, denominator: 1 })).toBe(300);
     expect(createSequenceExportPlan(667, { numerator: 30, denominator: 1 }).durationSeconds).toBeCloseTo(22.2333333333, 10);
+  });
+
+  it('uses bounded WebM timestamp and Opus packet tolerances rather than a whole-frame duration allowance', () => {
+    const videoTolerance = videoTimestampToleranceSeconds(1 / 30, 0.001);
+    const audioOnsetTolerance = audioOnsetToleranceSeconds(48_000, OPUS_PACKET_DURATION_SECONDS, 0.001);
+    const audioDurationTolerance = audioDurationToleranceSeconds(48_000, OPUS_PACKET_DURATION_SECONDS, 0.001);
+    expect(videoTolerance).toBeCloseTo(1 / 60 + 0.0005, 12);
+    expect(audioOnsetTolerance).toBeCloseTo(0.0105208333333, 12);
+    expect(audioDurationTolerance).toBeCloseTo(0.0205208333333, 12);
+    expect(videoTolerance).toBeLessThan(1 / 30);
+    expect(audioDurationTolerance).toBeLessThan(1 / 30);
+
+    const expectedDuration = createSequenceExportPlan(667, { numerator: 30, denominator: 1 }).durationSeconds;
+    const historicalReportedDuration = 22.646;
+    const historicalDelta = historicalReportedDuration - expectedDuration;
+    expect(historicalDelta).toBeCloseTo(0.4126666667, 9);
+    expect(Math.abs(historicalDelta)).toBeGreaterThan(audioDurationTolerance);
+    // This asserts only the threshold arithmetic; it does not reproduce or resolve the user's historical export.
   });
 
   it('derives fractional-rate timestamps and durations from rounded integer frame boundaries', () => {
@@ -94,9 +121,9 @@ describe('deterministic sequence export plan', () => {
 
 describe('frame-index export loop', () => {
   it('requires requested, rendered, submitted, encoded, and parsed file counts to match exactly', () => {
-    expect(areExportFrameCountsExact(30, { requested: 30, rendered: 30, submitted: 30, encoded: 30, outputFile: 30 })).toBe(true);
-    for (const stage of ['requested', 'rendered', 'submitted', 'encoded', 'outputFile'] as const) {
-      const counts = { requested: 30, rendered: 30, submitted: 30, encoded: 30, outputFile: 30 };
+    expect(areExportFrameCountsExact(30, { requested: 30, rendered: 30, submitted: 30, encoded: 30, outputFilePackets: 30 })).toBe(true);
+    for (const stage of ['requested', 'rendered', 'submitted', 'encoded', 'outputFilePackets'] as const) {
+      const counts = { requested: 30, rendered: 30, submitted: 30, encoded: 30, outputFilePackets: 30 };
       counts[stage] = 29;
       expect(areExportFrameCountsExact(30, counts)).toBe(false);
     }

@@ -51,6 +51,8 @@ jobs:
         shell: pwsh
         run: |
           $env:CLIPWRIGHT_SMOKE_TEST = '1'
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'clipwright-production-export-artifacts'
+          $env:CLIPWRIGHT_SMOKE_ARTIFACT_DIR = $artifactDirectory
           $reportPath = Join-Path $env:RUNNER_TEMP 'deterministic-webm-smoke.json'
           $env:CLIPWRIGHT_SMOKE_REPORT_PATH = $reportPath
           $appPath = Join-Path 'release\win-unpacked' 'ClipWright Studio.exe'
@@ -72,27 +74,61 @@ jobs:
           }
           $report = Get-Content -Raw $reportPath | ConvertFrom-Json
           if (-not $report.pass) {
-            throw "Deterministic WebM frame-count, duration, or decoded A/V-offset gate failed: $($report | ConvertTo-Json -Depth 8 -Compress)"
+            throw "Packaged production-export validation failed: $($report | ConvertTo-Json -Depth 10 -Compress)"
+          }
+          foreach ($requiredFile in @('source-A.webm', 'source-B.webm', 'saved-project.json', 'fixture.json', 'timeline-export.webm')) {
+            if (-not (Test-Path (Join-Path $artifactDirectory $requiredFile))) { throw "Required production-export artifact missing: $requiredFile" }
           }
           @"
-          ## Packaged Windows deterministic WebM export smoke
-          - Expected: $($report.expected.frameCount) frames at $($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator) fps; frame-aligned video duration $($report.expected.frameAlignedVideoDurationSeconds)s.
-          - Frame counts: requested $($report.counts.requested), rendered $($report.counts.rendered), submitted $($report.counts.submitted), encoded $($report.counts.encoded), output file $($report.counts.outputFile).
-          - Video: $($report.actual.videoDurationSeconds)s (delta $($report.actual.videoDurationDeltaSeconds)s), measured rate $($report.actual.measuredVideoFrameRate) fps, $($report.actual.videoDimensions.width)x$($report.actual.videoDimensions.height).
-          - Audio: $($report.actual.audioDurationSeconds)s (delta $($report.actual.audioDurationDeltaSeconds)s); container: $($report.actual.containerDurationSeconds)s (delta $($report.actual.containerDurationDeltaSeconds)s).
-          - Decoded synthetic signal A/V offset: expected $($report.expected.audioMinusVideoOffsetSeconds)s, measured $($report.actual.decodedAvOffset.audioMinusVideoOffsetSeconds)s, error $($report.actual.avOffsetErrorSeconds)s; one-frame tolerance $($report.expected.oneFrameToleranceSeconds)s.
-          - One-frame duration and A/V-offset tolerances: $($report.expected.oneFrameToleranceSeconds)s. Gate: PASS.
-          - Frame identity: $($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames) decoded frames matched source A/B frame IDs and black-gap/offline expectations; $($report.frameIdentity.mismatchCount) mismatches. Fixture includes cuts, trims, adjacent split clips, a 5-frame gap, and a 5-frame offline clip.
+          ## Packaged Windows production timeline export
+          - Production path: a serialized and reparsed saved project was exported by `exportTimelineProject` in the packaged Electron renderer using two generated VP9/Opus sources; offline and gap cases are included.
+          - Internal frame pipeline: requested $($report.frameIdentity.counts.requested), rendered $($report.frameIdentity.counts.rendered), submitted $($report.frameIdentity.counts.submitted), encoded $($report.frameIdentity.counts.encoded), WebM video packets $($report.frameIdentity.counts.outputVideoPackets); built-in decoded sample probes passed: $($report.frameIdentity.actual.decodedSampleFrames); independent FFmpeg full decode below.
+          - Independent FFmpeg/ffprobe checks compare all video frames, PTS, identity pixels, all six audio pulse onsets, A/V sync, and track/container durations with explicit tolerances.
+          - Video tolerance: $($report.frameIdentity.expected.videoTimestampToleranceSeconds)s; audio duration: $($report.frameIdentity.expected.audioDurationToleranceSeconds)s; A/V onset: $($report.frameIdentity.expected.audioOnsetToleranceSeconds)s.
+          - WebCodecs config (hardwareAcceleration is a preference, not hardware proof): video $($report.frameIdentity.actual.encoderConfiguration.video | ConvertTo-Json -Compress -Depth 5); audio $($report.frameIdentity.actual.encoderConfiguration.audio | ConvertTo-Json -Compress -Depth 5).
+          - Synthetic-only artifacts: two source files, exact saved-project JSON, fixture manifest, actual production export, smoke report, and independent FFmpeg/ffprobe report.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           $invariant = [System.Globalization.CultureInfo]::InvariantCulture
-          $videoDuration = ([double]$report.actual.videoDurationSeconds).ToString('0.000000', $invariant)
-          $audioDuration = ([double]$report.actual.audioDurationSeconds).ToString('0.000000', $invariant)
-          $containerDuration = ([double]$report.actual.containerDurationSeconds).ToString('0.000000', $invariant)
-          $avOffset = ([double]$report.actual.decodedAvOffset.audioMinusVideoOffsetSeconds).ToString('0.000000', $invariant)
-          $avOffsetError = ([double]$report.actual.avOffsetErrorSeconds).ToString('0.000000', $invariant)
-          $durationTolerance = ([double]$report.expected.oneFrameToleranceSeconds).ToString('0.000000', $invariant)
-          $summary = "PASS $($report.counts.encoded)/$($report.expected.frameCount) A/V frames @$($report.expected.frameRate.numerator)/$($report.expected.frameRate.denominator)fps; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; av=${avOffset}s/err=${avOffsetError}s; id=$($report.frameIdentity.actual.decodedFileFrames)/$($report.frameIdentity.expected.frames),err=$($report.frameIdentity.mismatchCount); tol=${durationTolerance}s"
+          $videoDuration = ([double]$report.frameIdentity.actual.videoDurationSeconds).ToString('0.000000', $invariant)
+          $audioDuration = ([double]$report.frameIdentity.actual.audioDurationSeconds).ToString('0.000000', $invariant)
+          $containerDuration = ([double]$report.frameIdentity.actual.containerDurationSeconds).ToString('0.000000', $invariant)
+          $durationTolerance = ([double]$report.frameIdentity.expected.videoTimestampToleranceSeconds).ToString('0.000000', $invariant)
+          $summary = "PASS prod $($report.frameIdentity.counts.decodedVideoFrames)/$($report.frameIdentity.expected.frames) frames; v=${videoDuration}s a=${audioDuration}s c=${containerDuration}s; FFmpeg checks passed; vtol=${durationTolerance}s"
           "summary=$summary" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Require CI-only FFmpeg and ffprobe
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+          }
+          $ffmpeg = Get-Command ffmpeg -ErrorAction Stop
+          $ffprobe = Get-Command ffprobe -ErrorAction Stop
+          ffmpeg -version | Select-Object -First 1
+          ffprobe -version | Select-Object -First 1
+          python --version
+          "FFMPEG_PATH=$($ffmpeg.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FFPROBE_PATH=$($ffprobe.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Independently decode and validate production export with FFmpeg/ffprobe
+        id: independent-export-validation
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'clipwright-production-export-artifacts'
+          $smokeReportPath = Join-Path $env:RUNNER_TEMP 'deterministic-webm-smoke.json'
+          $validationReportPath = Join-Path $env:RUNNER_TEMP 'ffmpeg-independent-validation.json'
+          python scripts\validate-export-smoke.py --artifact-dir $artifactDirectory --ffmpeg $env:FFMPEG_PATH --ffprobe $env:FFPROBE_PATH --smoke-report $smokeReportPath --report $validationReportPath
+          if ($LASTEXITCODE -ne 0) { throw 'Independent FFmpeg/ffprobe validation failed.' }
+          $independent = Get-Content -Raw $validationReportPath | ConvertFrom-Json
+          if (-not $independent.pass) { throw 'Independent validator did not report pass.' }
+          @"
+          ## Independent FFmpeg/ffprobe result
+          - Full decode: $($independent.counts.fullDecodedVideoFrames) / $($independent.counts.ffprobeFrames) video frames; $($independent.counts.audioPackets) audio packets.
+          - Video/audio codec: $($independent.codec.video) / $($independent.codec.audio); source fixture full-decode checks: $($independent.syntheticSources.A.fullDecode), $($independent.syntheticSources.B.fullDecode).
+          - Timing: video $($independent.timing.videoDurationSeconds)s, decoded audio $($independent.timing.audioDecodedDurationSeconds)s, container $($independent.timing.containerDurationSeconds)s; tolerances video $($independent.timing.videoTimestampToleranceSeconds)s, audio $($independent.timing.audioDurationToleranceSeconds)s, container $($independent.timing.containerDurationToleranceSeconds)s, A/V onset $($independent.timing.audioOnsetToleranceSeconds)s.
+          - Content: $($independent.content.identityFramesCompared) independently decoded frame identities; $($independent.content.mismatchCount) mismatches; flash frames $($independent.content.syncFlashIndexes).
+          - Encoder configurations are WebCodecs effective configuration; physical hardware encoder is not asserted (hardwareAcceleration is only a preference).
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Publish Windows WebM smoke measurements
         uses: actions/github-script@v7
@@ -110,8 +146,8 @@ jobs:
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
 
-      - name: Upload installer diagnostics on failure
-        if: failure()
+      - name: Upload synthetic export, FFmpeg, and Windows build diagnostics
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ClipWright-Windows-build-diagnostics
@@ -120,8 +156,10 @@ jobs:
             ${{ runner.temp }}/deterministic-webm-smoke.json
             ${{ runner.temp }}/packaged-smoke-stdout.log
             ${{ runner.temp }}/packaged-smoke-stderr.log
+            ${{ runner.temp }}/ffmpeg-independent-validation.json
+            ${{ runner.temp }}/clipwright-production-export-artifacts/*
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 14
 
       - name: Upload unsigned installer
         uses: actions/upload-artifact@v7

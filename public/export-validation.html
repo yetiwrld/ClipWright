@@ -77,7 +77,7 @@
           <div class="stat"><dt>Playback waiting events</dt><dd id="playback-waiting">—</dd></div>
         </dl>
       </div>
-      <p class="note">The packet count and media-track durations come from reading the selected WebM, not from browser presentation callbacks. A separate full video decode is attempted to identify corrupt encoded content. Playback drops and callback cadence are device/browser playback metrics only; they do not count missing export frames. Duration deltas use the frame-aligned sequence duration and a tolerance of at most one sequence frame.</p>
+      <p class="note">Packet counts, media-track/container durations, and a full decoded-frame count come from reading the selected WebM, not from browser presentation callbacks. A decode failure or decoded count different from the saved sequence frame count fails the file gate. Playback drops and callback cadence are device/browser playback metrics only; they do not count missing export frames. Duration deltas use explicit bounds: video half a frame plus half a WebM timebase tick; Opus audio one 20 ms packet plus half a timebase tick and one sample; container uses the stricter applicable track bound. This diagnostic page does not certify audio/video synchronization or inspect every decoded pixel.</p>
     </section>
     <section class="panel" aria-labelledby="report-title">
       <h2 id="report-title">3. Save the report with the device test notes</h2>

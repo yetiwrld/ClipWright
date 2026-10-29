@@ -224,6 +224,28 @@ async function writeSmokeReport(report) {
   }
 }
 
+async function writeSmokeArtifacts(artifacts) {
+  const artifactDirectory = process.env.CLIPWRIGHT_SMOKE_ARTIFACT_DIR;
+  if (process.env.CLIPWRIGHT_SMOKE_TEST !== '1' || !artifactDirectory || !artifacts || typeof artifacts !== 'object') return;
+  try {
+    await fs.mkdir(artifactDirectory, { recursive: true });
+    for (const [name, base64] of Object.entries(artifacts)) {
+      if (!/^[a-z0-9][a-z0-9.-]{0,100}$/i.test(name) || typeof base64 !== 'string') throw new Error(`Invalid synthetic smoke artifact: ${name}`);
+      const bytes = Buffer.from(base64, 'base64');
+      if (bytes.length === 0 || bytes.length > 100 * 1024 * 1024) throw new Error(`Synthetic smoke artifact has an invalid size: ${name}`);
+      await fs.writeFile(path.join(artifactDirectory, name), bytes);
+    }
+  } catch (error) {
+    console.error('Desktop smoke test could not write its media artifacts:', error);
+  }
+}
+
+function reportWithoutArtifacts(measurements) {
+  if (!measurements || typeof measurements !== 'object') return measurements;
+  const { artifacts: _artifacts, ...report } = measurements;
+  return report;
+}
+
 function runRendererSmokeCheck(window) {
   const deadline = Date.now() + 150_000;
   let finished = false;
@@ -262,10 +284,12 @@ function runRendererSmokeCheck(window) {
               reject(new Error(`Deterministic WebM export smoke timed out after 120 seconds; last stage: ${currentStage}`));
             }, 120_000)),
           ]);
-          await writeSmokeReport(smokeMeasurements);
-          if (!smokeMeasurements?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(smokeMeasurements)}`);
+          await writeSmokeArtifacts(smokeMeasurements?.artifacts);
+          const report = reportWithoutArtifacts(smokeMeasurements);
+          await writeSmokeReport(report);
+          if (!report?.pass) throw new Error(`Deterministic WebM export smoke failed: ${JSON.stringify(report)}`);
           finished = true;
-          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(smokeMeasurements)}`);
+          console.log(`Desktop smoke test passed: ${state.title} rendered; preload IPC responded on ${state.info.platform}; deterministic WebM measurements: ${JSON.stringify(report)}`);
           app.exit(0);
           return;
         }
@@ -273,8 +297,9 @@ function runRendererSmokeCheck(window) {
     } catch (error) {
       finished = true;
       const message = error instanceof Error ? error.message : String(error);
+      await writeSmokeArtifacts(smokeMeasurements?.artifacts);
       const report = smokeMeasurements && typeof smokeMeasurements === 'object'
-        ? { ...smokeMeasurements, pass: false, stage, error: message }
+        ? { ...reportWithoutArtifacts(smokeMeasurements), pass: false, stage, error: message }
         : { pass: false, stage, error: message, stack: error instanceof Error ? error.stack : undefined };
       await writeSmokeReport(report);
       console.error('Desktop smoke test failed:', error);

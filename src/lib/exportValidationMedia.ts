@@ -1,4 +1,9 @@
 import { ALL_FORMATS, BlobSource, EncodedPacketSink, Input, VideoSampleSink } from 'mediabunny';
+import {
+  OPUS_PACKET_DURATION_SECONDS,
+  audioDurationToleranceSeconds,
+  videoTimestampToleranceSeconds,
+} from './deterministicWebmExport';
 
 export interface SequenceExpectation {
   projectId: string | null;
@@ -18,29 +23,34 @@ export interface WebmFileInspection {
     frames: number;
     durationSeconds: number;
     frameRate: number;
+    timeResolution: number;
     width: number;
     height: number;
     codec: string | null;
     decodedFrames: number | null;
     decodeError: string | null;
   };
-  audio: { durationSeconds: number; codec: string | null } | null;
+  audio: { durationSeconds: number; timeResolution: number; sampleRate: number; codec: string | null } | null;
   containerDurationSeconds: number;
 }
 
 export interface ExportFileChecks {
   expectedDurationSeconds: number;
-  durationToleranceSeconds: number;
+  videoDurationToleranceSeconds: number;
+  audioDurationToleranceSeconds: number | null;
+  containerDurationToleranceSeconds: number;
   actualVideoFrames: number;
+  decodedVideoFrames: number | null;
+  decodedVideoComplete: boolean;
   missingExportFrames: number;
   extraOutputFrames: number;
   frameCoveragePercent: number;
   videoDurationDifferenceSeconds: number;
-  videoDurationWithinOneFrame: boolean;
+  videoDurationWithinTolerance: boolean;
   audioDurationDifferenceSeconds: number | null;
-  audioDurationWithinOneFrame: boolean | null;
+  audioDurationWithinTolerance: boolean | null;
   containerDurationDifferenceSeconds: number;
-  containerDurationWithinOneFrame: boolean;
+  containerDurationWithinTolerance: boolean;
   frameCountExact: boolean;
 }
 
@@ -56,22 +66,38 @@ export function measureExportFile(expectation: SequenceExpectation, inspection: 
   const videoDurationDifferenceSeconds = inspection.video.durationSeconds - expectation.durationSeconds;
   const audioDurationDifferenceSeconds = inspection.audio ? inspection.audio.durationSeconds - expectation.durationSeconds : null;
   const containerDurationDifferenceSeconds = inspection.containerDurationSeconds - expectation.durationSeconds;
-  const durationToleranceSeconds = expectation.frameRate.denominator / expectation.frameRate.numerator;
+  const framePeriodSeconds = expectation.frameRate.denominator / expectation.frameRate.numerator;
+  const videoDurationToleranceSeconds = videoTimestampToleranceSeconds(framePeriodSeconds, 1 / inspection.video.timeResolution);
+  const audioDurationToleranceSeconds = inspection.audio
+    ? audioDurationToleranceSecondsForTrack(inspection.audio.sampleRate, 1 / inspection.audio.timeResolution)
+    : null;
+  const containerDurationToleranceSeconds = Math.max(videoDurationToleranceSeconds, audioDurationToleranceSeconds ?? videoDurationToleranceSeconds);
+  const decodedVideoComplete = inspection.video.decodeError === null && inspection.video.decodedFrames === expectation.frameCount;
   return {
     expectedDurationSeconds: expectation.durationSeconds,
-    durationToleranceSeconds,
+    videoDurationToleranceSeconds,
+    audioDurationToleranceSeconds,
+    containerDurationToleranceSeconds,
     actualVideoFrames,
+    decodedVideoFrames: inspection.video.decodedFrames,
+    decodedVideoComplete,
     missingExportFrames: Math.max(0, expectation.frameCount - actualVideoFrames),
     extraOutputFrames: Math.max(0, actualVideoFrames - expectation.frameCount),
     frameCoveragePercent: actualVideoFrames / expectation.frameCount * 100,
     videoDurationDifferenceSeconds,
-    videoDurationWithinOneFrame: Math.abs(videoDurationDifferenceSeconds) <= durationToleranceSeconds,
+    videoDurationWithinTolerance: Math.abs(videoDurationDifferenceSeconds) <= videoDurationToleranceSeconds,
     audioDurationDifferenceSeconds,
-    audioDurationWithinOneFrame: audioDurationDifferenceSeconds === null ? null : Math.abs(audioDurationDifferenceSeconds) <= durationToleranceSeconds,
+    audioDurationWithinTolerance: audioDurationDifferenceSeconds === null || audioDurationToleranceSeconds === null
+      ? null
+      : Math.abs(audioDurationDifferenceSeconds) <= audioDurationToleranceSeconds,
     containerDurationDifferenceSeconds,
-    containerDurationWithinOneFrame: Math.abs(containerDurationDifferenceSeconds) <= durationToleranceSeconds,
-    frameCountExact: actualVideoFrames === expectation.frameCount,
+    containerDurationWithinTolerance: Math.abs(containerDurationDifferenceSeconds) <= containerDurationToleranceSeconds,
+    frameCountExact: actualVideoFrames === expectation.frameCount && decodedVideoComplete,
   };
+}
+
+function audioDurationToleranceSecondsForTrack(sampleRate: number, timebaseSeconds: number) {
+  return audioDurationToleranceSeconds(sampleRate, OPUS_PACKET_DURATION_SECONDS, timebaseSeconds);
 }
 
 export function readActiveSequenceExpectation(projectDocument: unknown): SequenceExpectation {
@@ -115,6 +141,9 @@ export async function inspectWebmFile(file: Blob): Promise<WebmFileInspection> {
     let frames = 0;
     for await (const _packet of packetSink.packets()) frames += 1;
     const durationSeconds = await videoTrack.computeDuration();
+    const timeResolution = await videoTrack.getTimeResolution();
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('The selected WebM reports an invalid video duration.');
+    if (!Number.isFinite(timeResolution) || timeResolution <= 0) throw new Error('The selected WebM reports an invalid video timestamp resolution.');
     const width = await videoTrack.getDisplayWidth();
     const height = await videoTrack.getDisplayHeight();
     const codec = await videoTrack.getCodec();
@@ -132,16 +161,25 @@ export async function inspectWebmFile(file: Blob): Promise<WebmFileInspection> {
       decodedFrames = null;
     }
     const audioTrack = await input.getPrimaryAudioTrack();
-    const audio = audioTrack ? {
-      durationSeconds: await audioTrack.computeDuration(),
-      codec: await audioTrack.getCodec(),
-    } : null;
+    let audio: WebmFileInspection['audio'] = null;
+    if (audioTrack) {
+      const durationSeconds = await audioTrack.computeDuration();
+      const timeResolution = await audioTrack.getTimeResolution();
+      const sampleRate = await audioTrack.getSampleRate();
+      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('The selected WebM reports an invalid audio duration.');
+      if (!Number.isFinite(timeResolution) || timeResolution <= 0) throw new Error('The selected WebM reports an invalid audio timestamp resolution.');
+      if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new Error('The selected WebM reports an invalid audio sample rate.');
+      audio = { durationSeconds, timeResolution, sampleRate, codec: await audioTrack.getCodec() };
+    }
+    const containerDurationSeconds = await input.computeDuration();
+    if (!Number.isFinite(containerDurationSeconds) || containerDurationSeconds <= 0) throw new Error('The selected WebM reports an invalid container duration.');
     return {
       mimeType: await input.getMimeType(),
       video: {
         frames,
         durationSeconds,
         frameRate: durationSeconds > 0 ? frames / durationSeconds : 0,
+        timeResolution,
         width,
         height,
         codec,
@@ -149,7 +187,7 @@ export async function inspectWebmFile(file: Blob): Promise<WebmFileInspection> {
         decodeError,
       },
       audio,
-      containerDurationSeconds: await input.computeDuration(),
+      containerDurationSeconds,
     };
   } finally {
     input.dispose();

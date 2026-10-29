@@ -147,7 +147,9 @@
       const videoDelta = checks?.videoDurationDifferenceSeconds ?? null;
       const audioDelta = checks?.audioDurationDifferenceSeconds ?? null;
       const containerDelta = checks?.containerDurationDifferenceSeconds ?? null;
-      const durationTolerance = checks?.durationToleranceSeconds ?? null;
+      const videoDurationTolerance = checks?.videoDurationToleranceSeconds ?? null;
+      const audioDurationTolerance = checks?.audioDurationToleranceSeconds ?? null;
+      const containerDurationTolerance = checks?.containerDurationToleranceSeconds ?? null;
       const frameCoverage = checks?.frameCoveragePercent == null ? null : checks.frameCoveragePercent / 100;
       return {
         kind: 'clipwright-webm-export-validation',
@@ -174,10 +176,11 @@
             frameCount: inspection.video.frames,
             configuredFrameRate: expectation?.frameRate.value ?? null,
             measuredFrameRate: Number(inspection.video.frameRate.toFixed(9)),
+            timeResolution: inspection.video.timeResolution,
             durationSeconds: Number(inspection.video.durationSeconds.toFixed(9)),
             durationDifferenceFromFrameAlignedExpectedSeconds: videoDelta === null ? null : Number(videoDelta.toFixed(9)),
-            durationToleranceSeconds: durationTolerance,
-            durationWithinOneFrame: videoDelta !== null && durationTolerance !== null ? Math.abs(videoDelta) <= durationTolerance : null,
+            durationToleranceSeconds: videoDurationTolerance,
+            durationWithinTolerance: checks?.videoDurationWithinTolerance ?? null,
             frameCoveragePercent: frameCoverage === null ? null : Number((frameCoverage * 100).toFixed(2)),
             missingExportFrames: missingFrames,
             extraOutputFrames: extraFrames,
@@ -186,20 +189,25 @@
             fullDecode: {
               decodedFrames: inspection.video.decodedFrames,
               error: inspection.video.decodeError,
-              corruptionDetected: inspection.video.decodeError !== null || (inspection.video.decodedFrames !== null && inspection.video.decodedFrames !== inspection.video.frames),
-              decodedFrameDifference: inspection.video.decodedFrames === null ? null : inspection.video.frames - inspection.video.decodedFrames,
+              completeAgainstExpectedFrames: checks?.decodedVideoComplete ?? false,
+              corruptionDetected: inspection.video.decodeError !== null || (inspection.video.decodedFrames !== null && inspection.video.decodedFrames !== expectation?.frameCount),
+              decodedFrameDifferenceFromExpected: inspection.video.decodedFrames === null || !expectation ? null : expectation.frameCount - inspection.video.decodedFrames,
             },
           },
           audio: inspection.audio ? {
             durationSeconds: Number(inspection.audio.durationSeconds.toFixed(9)),
             durationDifferenceFromFrameAlignedExpectedSeconds: audioDelta === null ? null : Number(audioDelta.toFixed(9)),
-            durationWithinOneFrame: audioDelta !== null && durationTolerance !== null ? Math.abs(audioDelta) <= durationTolerance : null,
+            durationToleranceSeconds: audioDurationTolerance,
+            durationWithinTolerance: checks?.audioDurationWithinTolerance ?? null,
+            timeResolution: inspection.audio.timeResolution,
+            sampleRate: inspection.audio.sampleRate,
             codec: inspection.audio.codec,
           } : null,
           container: {
             durationSeconds: Number(inspection.containerDurationSeconds.toFixed(9)),
             durationDifferenceFromFrameAlignedExpectedSeconds: containerDelta === null ? null : Number(containerDelta.toFixed(9)),
-            durationWithinOneFrame: containerDelta !== null && durationTolerance !== null ? Math.abs(containerDelta) <= durationTolerance : null,
+            durationToleranceSeconds: containerDurationTolerance,
+            durationWithinTolerance: checks?.containerDurationWithinTolerance ?? null,
           },
         } : null,
         playback: {
@@ -238,7 +246,9 @@
       const elapsed = Math.max(0.001, accumulatedPlaybackMs / 1000);
       const expectation = activeExpectation;
       const inspection = fileInspection;
-      const durationTolerance = exportChecks?.durationToleranceSeconds ?? null;
+      const videoDurationTolerance = exportChecks?.videoDurationToleranceSeconds ?? null;
+      const audioDurationTolerance = exportChecks?.audioDurationToleranceSeconds ?? null;
+      const containerDurationTolerance = exportChecks?.containerDurationToleranceSeconds ?? null;
       const videoDelta = exportChecks?.videoDurationDifferenceSeconds ?? null;
       const audioDelta = exportChecks?.audioDurationDifferenceSeconds ?? null;
       const containerDelta = exportChecks?.containerDurationDifferenceSeconds ?? null;
@@ -267,9 +277,12 @@
       reportView.textContent = JSON.stringify(report, null, 2);
       runButton.disabled = !file || !sequenceFile;
       downloadButton.disabled = false;
-      const countsPass = missing === 0 && extra === 0;
-      const durationPass = videoDelta !== null && durationTolerance !== null && Math.abs(videoDelta) <= durationTolerance;
-      status.textContent = `File inspection and playback ended: ${actualFrames} encoded video frames (expected ${expectation?.frameCount}); ${missing} missing / ${extra} extra; video Δ ${deltaText(videoDelta)} (limit one frame: ${durationTolerance?.toFixed(6)}s); playback drops ${quality?.droppedVideoFrames ?? 'unavailable'}, playback corruptions ${quality?.corruptedVideoFrames ?? 'unavailable'}. ${countsPass && durationPass ? 'Frame-count and video-duration gates pass; manual A/V and visual review is still required.' : 'Export frame-count or video-duration gate failed.'}`;
+      const countsPass = exportChecks?.frameCountExact === true && missing === 0 && extra === 0;
+      const durationPass = exportChecks?.videoDurationWithinTolerance === true
+        && exportChecks?.containerDurationWithinTolerance === true
+        && exportChecks?.audioDurationWithinTolerance !== false;
+      const decodeCount = inspection?.video.decodedFrames === null ? 'unavailable' : `${inspection.video.decodedFrames} decoded`;
+      status.textContent = `File inspection and playback ended: ${actualFrames} encoded video packets (expected ${expectation?.frameCount}); ${decodeCount}; ${missing} missing / ${extra} extra; video Δ ${deltaText(videoDelta)} (limit ${videoDurationTolerance?.toFixed(6)}s); audio Δ ${deltaText(audioDelta)} (limit ${audioDurationTolerance?.toFixed(6) ?? 'not applicable'}s); container Δ ${deltaText(containerDelta)} (limit ${containerDurationTolerance?.toFixed(6)}s); playback drops ${quality?.droppedVideoFrames ?? 'unavailable'}, playback corruptions ${quality?.corruptedVideoFrames ?? 'unavailable'}. ${countsPass && durationPass ? 'Encoded frame-count, full-decode, and duration gates pass; manual A/V sync and visual review is still required.' : 'Encoded frame-count, decode, or duration validation failed.'}`;
     }
     sequenceFileInput.addEventListener('change', () => {
       sequenceFile = sequenceFileInput.files?.[0] ?? null;

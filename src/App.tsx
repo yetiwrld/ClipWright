@@ -13,15 +13,13 @@ import type { AspectRatio, Project } from './lib/projects';
 import { createProjectDocument, migrateLegacyProjectEntry, parseProjectDocument, PROJECT_DOCUMENTS_KEY, readProjectDocuments, serializeProjectDocument, writeProjectDocuments } from './lib/projectDocument';
 import type { MediaAsset, ProjectDocument, Sequence, StreamInfo, TimelineClip, Track } from './lib/projectDocument';
 import { probeBrowserAudio, probeBrowserVideo } from './lib/browserMedia';
-import { exportResolutionLabel, getExportBitrates, getExportDimensions } from './lib/exportResolution';
+import { exportResolutionLabel } from './lib/exportResolution';
 import type { ExportQualityPreset, ExportResolutionPreset } from './lib/exportResolution';
 import { prepareLocalMediaFile } from './lib/localMediaImport';
 import { calculateWaveformPeaks } from './lib/audioWaveform';
-import { mapAudioPartToTimelineChunk } from './lib/timelineAudioFrames';
-import { AudioBufferSink, ALL_FORMATS, BufferSource, Input } from 'mediabunny';
-import type { WrappedAudioBuffer } from 'mediabunny';
-import { areExportFrameCountsExact, createSequenceExportPlan, encodeDeterministicWebm } from './lib/deterministicWebmExport';
-import { drawLetterboxedVideoFrame, openVideoFrameReader, selectActiveVideoClip, sourceTimeForTimelineClip } from './lib/timelineVideoFrames';
+import { selectActiveVideoClip } from './lib/timelineVideoFrames';
+import { exportTimelineProject, type TimelineExportResult } from './lib/timelineExport';
+import type { FramePipelineCounts } from './lib/deterministicWebmExport';
 import {
   addTimelineClip, clipDuration, clipEnd, duplicateTimelineClips, moveTimelineClips, pasteTimelineClips,
   quantizeTimelineTime, removeTimelineClips, resizeTimelineClip, sequenceDurationSeconds, splitTimelineClip,
@@ -1717,33 +1715,7 @@ function EditorFoundation({
       return track && !track.muted && !activeHiddenTracks[track.id] && !activeSessionSources[mediaKey(activeProjectDocument.id, clip.sourceId)];
     });
     if (missingVideo || missingAudio) onNotify('Some media is offline; those clips will export black or silent. Relink sources for a complete export.', 'warning');
-    const outputDimensions = getExportDimensions(activeSequence.width, activeSequence.height, exportResolution);
-    if (outputDimensions.width * outputDimensions.height > 33_177_600) {
-      onNotify('This export resolution is too large for browser export. Choose a smaller export size and retry.', 'error');
-      return;
-    }
 
-    const plan = createSequenceExportPlan(activeSequence.durationFrames, activeSequence.frameRate);
-    if (plan.frameCount < 1) return;
-    const canvas = window.document.createElement('canvas');
-    canvas.width = outputDimensions.width;
-    canvas.height = outputDimensions.height;
-    const canvasContext = canvas.getContext('2d', { alpha: false });
-    if (!canvasContext) {
-      onNotify('This browser could not create the export canvas.', 'error');
-      return;
-    }
-
-    type AudioReader = {
-      clip: TimelineClip;
-      track: Track;
-      iterator: AsyncGenerator<WrappedAudioBuffer, void, unknown>;
-      input: Input;
-      pending: WrappedAudioBuffer[];
-      exhausted: boolean;
-    };
-    const audioReaders: AudioReader[] = [];
-    const videoFrameReaders = new Map<string, Awaited<ReturnType<typeof openVideoFrameReader>>>();
     const controller = new AbortController();
     exportAbortControllerRef.current = controller;
     isExportingRef.current = true;
@@ -1753,139 +1725,83 @@ function EditorFoundation({
     videoRefs.forEach((ref) => ref.current?.pause());
     Object.values(audioElementRefs.current).forEach((audio) => audio?.pause());
 
-    const isAbort = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
-    const checkCancelled = () => {
-      if (controller.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+    let exportStage = 'validating project snapshot';
+    let result: TimelineExportResult | null = null;
+    let videoEncoderConfig: VideoEncoderConfig | null = null;
+    let audioEncoderConfig: AudioEncoderConfig | null = null;
+    let latestExportCounts: (FramePipelineCounts & { encoded: number }) | null = null;
+    const expectedDuration = activeSequence.durationFrames * activeSequence.frameRate.denominator / activeSequence.frameRate.numerator;
+    const expectedFrames = activeSequence.durationFrames;
+    const downloadDiagnostic = (error: unknown) => {
+      const diagnostic = {
+        schemaVersion: 1,
+        createdAt: new Date().toISOString(),
+        stage: exportStage,
+        projectId: activeProjectDocument.id,
+        sequenceId: activeSequence.id,
+        expected: {
+          frameCount: expectedFrames,
+          frameRate: activeSequence.frameRate,
+          durationSeconds: expectedDuration,
+        },
+        actual: {
+          counts: result?.counts ?? latestExportCounts,
+          measurements: result?.measurements ?? null,
+          expectedAudioTrack: result?.expectedAudioTrack ?? null,
+          outputDimensions: result?.outputDimensions ?? null,
+          encoderConfiguration: result?.encoderConfiguration ?? { video: videoEncoderConfig, audio: audioEncoderConfig },
+          durationValidation: result?.durationValidation ?? null,
+        },
+        localValidationDiagnostics: error && typeof error === 'object' && 'exportDiagnostics' in error
+          ? (error as Error & { exportDiagnostics?: unknown }).exportDiagnostics ?? null
+          : null,
+        error: {
+          name: error instanceof Error ? error.name : 'Error',
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack ?? null : null,
+        },
+        playbackCallbacks: null,
+        sourceMediaIncluded: false,
+      };
+      const blob = new Blob([JSON.stringify(diagnostic, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = window.document.createElement('a');
+      link.href = url;
+      link.download = `ClipWright-export-diagnostic-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      window.document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     };
+
     try {
-      const audioCandidates = [
-        ...audioClips.map((clip) => ({ clip, track: tracks.find((track) => track.id === clip.trackId) })).filter((item): item is { clip: TimelineClip; track: Track } => Boolean(item.track)),
-        ...videoClips.map((clip) => ({ clip, track: tracks.find((track) => track.id === clip.trackId) })).filter((item): item is { clip: TimelineClip; track: Track } => Boolean(item.track)),
-      ].filter(({ clip, track }) => !track.muted && !activeHiddenTracks[track.id] && (!activeSoloTracks.length || activeSoloTracks.includes(track.id)) && Boolean(activeSessionSources[mediaKey(activeProjectDocument.id, clip.sourceId)]));
-
-      for (const { clip, track } of audioCandidates) {
-        checkCancelled();
-        const source = activeSessionSources[mediaKey(activeProjectDocument.id, clip.sourceId)];
-        if (!source) continue;
-        const response = await fetch(source.url);
-        if (!response.ok) throw new Error(`Could not read audio from ${source.name}. Relink the source and try again.`);
-        const input = new Input({ source: new BufferSource(await response.arrayBuffer()), formats: ALL_FORMATS });
-        try {
-          const inputAudioTracks = await input.getAudioTracks();
-          const inputAudioTrack = inputAudioTracks[0];
-          if (!inputAudioTrack) { input.dispose(); continue; }
-          const sink = new AudioBufferSink(inputAudioTrack);
-          const iterator = sink.buffers(clip.trimIn, clip.trimIn + clipDuration(clip));
-          audioReaders.push({ clip, track, input, iterator, pending: [], exhausted: false });
-        } catch (error) {
-          input.dispose();
-          throw error;
-        }
+      const sourceBlobs = new Map<string, Blob>();
+      for (const asset of activeProjectDocument.assets) {
+        const source = activeSessionSources[mediaKey(activeProjectDocument.id, asset.id)];
+        if (source) sourceBlobs.set(asset.id, source.blob);
       }
-
-      const renderAudioChunk = async (startSeconds: number, durationSeconds: number) => {
-        const sampleRate = activeSequence.audioSampleRate;
-        const samples = Math.max(1, Math.round(durationSeconds * sampleRate));
-        const OfflineContext = window.OfflineAudioContext;
-        if (!OfflineContext) throw new Error('Offline audio mixing is unavailable in this browser.');
-        const context = new OfflineContext(2, samples, sampleRate);
-        const chunkEnd = startSeconds + durationSeconds;
-        for (const reader of audioReaders) {
-          checkCancelled();
-          const clip = reader.clip;
-          const clipTimelineEnd = clipEnd(clip);
-          const activeTimelineStart = Math.max(startSeconds, clip.start);
-          const activeTimelineEnd = Math.min(chunkEnd, clipTimelineEnd);
-          if (activeTimelineEnd <= activeTimelineStart) continue;
-          const sourceEndNeeded = clip.trimIn + activeTimelineEnd - clip.start;
-          while (!reader.exhausted && (!reader.pending.length || reader.pending[reader.pending.length - 1].timestamp + reader.pending[reader.pending.length - 1].duration < sourceEndNeeded - 1e-7)) {
-            const next = await reader.iterator.next();
-            if (next.done) reader.exhausted = true;
-            else reader.pending.push(next.value);
-          }
-          const sourceStartNeeded = clip.trimIn + activeTimelineStart - clip.start;
-          reader.pending = reader.pending.filter((part) => part.timestamp + part.duration > sourceStartNeeded - 1e-7);
-          for (const part of reader.pending) {
-            const mixWindow = mapAudioPartToTimelineChunk(
-              clip,
-              { timestamp: part.timestamp, duration: part.duration, bufferDuration: part.buffer.duration },
-              startSeconds,
-              durationSeconds,
-            );
-            if (!mixWindow) continue;
-            const sourceNode = context.createBufferSource();
-            sourceNode.buffer = part.buffer;
-            const gainNode = context.createGain();
-            gainNode.gain.value = reader.track.gain ?? 1;
-            sourceNode.connect(gainNode);
-            const pannerFactory = context.createStereoPanner?.bind(context);
-            if (pannerFactory) {
-              const panner = pannerFactory();
-              panner.pan.value = reader.track.pan ?? 0;
-              gainNode.connect(panner);
-              panner.connect(context.destination);
-            } else gainNode.connect(context.destination);
-            sourceNode.start(mixWindow.timelineOffset, mixWindow.sourceOffset, mixWindow.duration);
-          }
-        }
-        return context.startRendering();
-      };
-
-      const exportFrame = async (_frameIndex: number, timestampSeconds: number) => {
-        checkCancelled();
-        const clip = selectActiveVideoClip(videoClips, tracks, timestampSeconds, activeHiddenTracks);
-        let sourceCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
-        if (clip) {
-          const source = activeSessionSources[mediaKey(activeProjectDocument.id, clip.sourceId)];
-          if (source) {
-            let reader = videoFrameReaders.get(source.url);
-            if (!reader) {
-              reader = await openVideoFrameReader(source.blob);
-              videoFrameReaders.set(source.url, reader);
-            }
-            const decoded = await reader.getCanvasAt(sourceTimeForTimelineClip(clip, timestampSeconds));
-            sourceCanvas = decoded?.canvas ?? null;
-          }
-        }
-        checkCancelled();
-        drawLetterboxedVideoFrame(canvasContext, canvas.width, canvas.height, sourceCanvas);
-      };
-
-      const bitrates = getExportBitrates(outputDimensions.width, outputDimensions.height, frameRateValue, exportQuality);
-      const result = await encodeDeterministicWebm({
-        canvas,
-        plan,
-        videoBitrate: bitrates.videoBitsPerSecond,
-        audioBitrate: bitrates.audioBitsPerSecond,
-        includeAudio: audioReaders.length > 0,
+      result = await exportTimelineProject({
+        projectSnapshot: activeProjectDocument,
+        sourceBlobs,
+        sequenceId: activeSequence.id,
+        resolution: exportResolution,
+        quality: exportQuality,
+        hiddenTrackIds: activeHiddenTracks,
+        soloTrackIds: activeSoloTracks,
         signal: controller.signal,
-        drawFrame: exportFrame,
-        renderAudioChunk: audioReaders.length ? renderAudioChunk : undefined,
+        onStage: (stage) => { exportStage = stage; },
+        onVideoEncoderConfig: (config) => { videoEncoderConfig = config; },
+        onAudioEncoderConfig: (config) => { audioEncoderConfig = config; },
         onProgress: (counts) => {
-          if (counts.submitted && (counts.submitted % 10 === 0 || counts.submitted === plan.frameCount)) {
-            setExportProgress(Math.min(99, Math.floor(counts.submitted * 100 / plan.frameCount)));
+          latestExportCounts = counts;
+          if (counts.submitted && (counts.submitted % 10 === 0 || counts.submitted === expectedFrames)) {
+            setExportProgress(Math.min(99, Math.floor(counts.submitted * 100 / expectedFrames)));
           }
         },
       });
-      checkCancelled();
-      const expectedFrames = plan.frameCount;
-      const expectedDuration = plan.durationSeconds;
-      const frameTolerance = plan.frameDurationSeconds;
-      const videoDelta = result.measurements.outputVideoDurationSeconds - expectedDuration;
-      const audioDelta = result.measurements.outputAudioDurationSeconds === null ? null : result.measurements.outputAudioDurationSeconds - expectedDuration;
-      const containerDelta = result.measurements.outputContainerDurationSeconds - expectedDuration;
-      const frameCountsMatch = areExportFrameCountsExact(expectedFrames, {
-        ...result.counts,
-        outputFile: result.measurements.outputVideoFrames,
-      });
-      const durationsMatch = Math.abs(videoDelta) <= frameTolerance
-        && (audioDelta === null || Math.abs(audioDelta) <= frameTolerance)
-        && Math.abs(containerDelta) <= frameTolerance;
-      if (!frameCountsMatch || !durationsMatch) {
-        throw new Error(`Export validation failed: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, file ${result.measurements.outputVideoFrames} video frames (expected ${expectedFrames}); video duration ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s, audio ${result.measurements.outputAudioDurationSeconds === null ? 'none' : `${result.measurements.outputAudioDurationSeconds.toFixed(6)}s`}, container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s (expected ${expectedDuration.toFixed(6)}s, one-frame tolerance ${frameTolerance.toFixed(6)}s).`);
-      }
+      if (controller.signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
 
-      const outputName = `${project?.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'ClipWright-export'}${exportResolution === 'sequence' ? '' : `-${outputDimensions.width}x${outputDimensions.height}`}${exportQuality === 'standard' ? '' : `-${exportQuality}`}`;
+      const outputName = `${project?.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'ClipWright-export'}${exportResolution === 'sequence' ? '' : `-${result.outputDimensions.width}x${result.outputDimensions.height}`}${exportQuality === 'standard' ? '' : `-${exportQuality}`}`;
       const blob = new Blob([result.buffer], { type: result.measurements.mimeType || 'video/webm' });
       const objectUrl = URL.createObjectURL(blob);
       const link = window.document.createElement('a');
@@ -1896,21 +1812,30 @@ function EditorFoundation({
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
       const configuredFrameRate = activeSequence.frameRate.numerator / activeSequence.frameRate.denominator;
-      const audioMeasurement = result.measurements.outputAudioDurationSeconds === null ? 'no audio track' : `audio ${result.measurements.outputAudioDurationSeconds.toFixed(6)}s`;
-      onNotify(`Exported ${outputName}.webm: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, file ${result.measurements.outputVideoFrames} video frames (expected ${expectedFrames}); video ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s (expected ${expectedDuration.toFixed(6)}s) at ${result.measurements.outputVideoFrameRate.toFixed(6)} fps (sequence ${configuredFrameRate.toFixed(6)} fps); ${audioMeasurement}; container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s.`, 'success');
+      const audioMeasurement = result.measurements.outputAudioDurationSeconds === null
+        ? 'no audio track'
+        : `audio ${result.measurements.outputAudioDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.audioDeltaSeconds?.toFixed(6)}s, tol ${result.durationValidation.audioToleranceSeconds.toFixed(6)}s)`;
+      const videoConfig = result.encoderConfiguration.video;
+      const audioConfig = result.encoderConfiguration.audio;
+      const encoderSummary = `WebCodecs ${videoConfig?.codec ?? 'VP9'}${audioConfig ? `/${audioConfig.codec}` : ''}; hardware acceleration preference ${videoConfig?.hardwareAcceleration ?? 'default'} (physical hardware use unverified)`;
+      onNotify(`Exported ${outputName}.webm: requested ${result.counts.requested}, rendered ${result.counts.rendered}, submitted ${result.counts.submitted}, encoded ${result.counts.encoded}, output packets ${result.measurements.outputVideoPackets} (expected ${expectedFrames}); ${result.measurements.decodedSampleFrames} decoded validation samples passed; video ${result.measurements.outputVideoDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.videoDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.videoToleranceSeconds.toFixed(6)}s) at ${result.measurements.outputVideoPacketRate.toFixed(6)} packets/s (sequence ${configuredFrameRate.toFixed(6)} fps); ${audioMeasurement}; container ${result.measurements.outputContainerDurationSeconds.toFixed(6)}s (Δ ${result.durationValidation.containerDeltaSeconds.toFixed(6)}s, tol ${result.durationValidation.containerToleranceSeconds.toFixed(6)}s); ${encoderSummary}.`, 'success');
       setExportProgress(100);
     } catch (error) {
-      if (isAbort(error) || controller.signal.aborted) onNotify('Export cancelled; no file was downloaded.', 'warning');
-      else onNotify(error instanceof Error ? error.message : 'Could not export the active sequence.', 'error');
+      const isAbort = error instanceof DOMException && error.name === 'AbortError';
+      if (isAbort || controller.signal.aborted) onNotify('Export cancelled; no file was downloaded.', 'warning');
+      else {
+        let diagnosticStatus = 'A diagnostic report was downloaded without source media.';
+        try { downloadDiagnostic(error); }
+        catch (diagnosticError) {
+          diagnosticStatus = 'The diagnostic report could not be downloaded.';
+          console.error('ClipWright export diagnostic download failed:', diagnosticError);
+        }
+        const message = error instanceof Error ? error.message : 'Could not export the active sequence.';
+        onNotify(`${message} ${diagnosticStatus}`, 'error');
+      }
       setExportProgress(0);
     } finally {
       controller.abort();
-      for (const reader of audioReaders) {
-        try { await reader.iterator.return?.(); } catch { /* Release decoder iterators after successful output or cancellation. */ }
-        reader.input.dispose();
-      }
-      for (const reader of videoFrameReaders.values()) await reader.dispose();
-      videoFrameReaders.clear();
       if (exportAbortControllerRef.current === controller) exportAbortControllerRef.current = null;
       isExportingRef.current = false;
       setIsExporting(false);
